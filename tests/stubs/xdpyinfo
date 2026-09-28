@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Test stub for xdpyinfo.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+XWL1_DISPLAY=${STUB_XWL1_DISPLAY:-:98}
+if [[ "${DISPLAY:-}" == "$XWL1_DISPLAY" && "${STUB_XWL1_ABSENT:-0}" != 1 ]]; then
+  mode=$(cat "$SD/xwl1_mode" 2>/dev/null || printf '3440x1440')
+else
+  mode=$(cat "$SD/mode" 2>/dev/null || printf '3440x1440@165')
+fi
+size=${mode%%@*}
+printf 'screen #0:\n  dimensions: %s pixels (600x400 millimeters)\n' "$size"
+printf '  depth of root window:    24 planes\n'

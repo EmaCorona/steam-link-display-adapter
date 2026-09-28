@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test stub for pactl — only "list short sinks" is used by the wrapper.
+set -u
+SD=${STUB_STATE_DIR:?}
+if [[ "${1:-}" == "list" && "${2:-}" == "short" && "${3:-}" == "sinks" ]]; then
+  if [[ "${STUB_STREAM_ACTIVE:-0}" == 1 || -f "$SD/stream-on" ]]; then
+    printf '42\tsteam-streaming-playback\tPipeWire\ts16le 2ch 48000Hz\tSUSPENDED\n'
+  fi
+fi
+exit 0

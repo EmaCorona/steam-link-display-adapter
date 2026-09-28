@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# Test stub for xprop (gamescope root atoms + XWAYLAND_MODE_CONTROL writer).
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+XWL1_DISPLAY=${STUB_XWL1_DISPLAY:-:98}
+XWL0_DISPLAY=${STUB_XWL0_DISPLAY:-:99}
+
+# Simulated gamescope handling of GAMESCOPE_XWAYLAND_MODE_CONTROL writes:
+# value "idx, w, h, allowSuperRes" -> the target server's root geometry changes.
+if [[ "${*}" == *"-set GAMESCOPE_XWAYLAND_MODE_CONTROL"* ]]; then
+  [[ "${STUB_XWL_FAIL:-0}" == 1 ]] && exit 1
+  [[ "${STUB_XWL_NOOP:-0}" == 1 ]] && exit 0
+  val=""
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == "-set" ]]; then val="${args[$((i + 2))]:-}"; fi
+  done
+  idx=${val%%,*}
+  rest=${val#*,}
+  w=${rest%%,*}
+  rest=${rest#*,}
+  h=${rest%%,*}
+  idx=$(tr -d ' ' <<<"$idx"); w=$(tr -d ' ' <<<"$w"); h=$(tr -d ' ' <<<"$h")
+  if [[ "$idx" == 1 ]]; then
+    if [[ "${STUB_XWL1_ABSENT:-0}" == 1 ]]; then exit 0; fi
+    printf '%sx%s\n' "$w" "$h" >"$SD/xwl1_mode"
+    printf 'wlserver: Updating mode for xwayland server #1: %sx%s@60\n' "$w" "$h" >>"$SD/journal"
+  fi
+  exit 0
+fi
+
+if [[ "${*}" == *"-set GAMESCOPE_DISPLAY_MODE_NUDGE"* ]]; then
+  exit 0
+fi
+
+case "${2:-}" in
+  GAMESCOPE_XWAYLAND_SERVER_ID)
+    if [[ "${STUB_XWL1_ABSENT:-0}" == 1 && "${DISPLAY:-}" == "$XWL1_DISPLAY" ]]; then
+      printf 'GAMESCOPE_XWAYLAND_SERVER_ID:  not found.\n'
+      exit 1
+    fi
+    if [[ "${DISPLAY:-}" == "$XWL1_DISPLAY" ]]; then
+      printf 'GAMESCOPE_XWAYLAND_SERVER_ID(CARDINAL) = 1\n'
+    elif [[ "${DISPLAY:-}" == "$XWL0_DISPLAY" ]]; then
+      printf 'GAMESCOPE_XWAYLAND_SERVER_ID(CARDINAL) = 0\n'
+    else
+      printf 'GAMESCOPE_XWAYLAND_SERVER_ID:  not found.\n'
+      exit 1
+    fi
+    ;;
+  GAMESCOPE_DISPLAY_MODE_LIST_EXTERNAL)
+    if [[ -n "${STUB_MODE_LIST:-}" ]]; then
+      printf 'GAMESCOPE_DISPLAY_MODE_LIST_EXTERNAL(STRING) = "%s"\n' "$STUB_MODE_LIST"
+    else
+      printf 'GAMESCOPE_DISPLAY_MODE_LIST_EXTERNAL:  not found.\n'
+      exit 1
+    fi
+    ;;
+  GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK)
+    r=$(sed -n 's/.*@//p' "$SD/mode" 2>/dev/null)
+    printf 'GAMESCOPE_DISPLAY_REFRESH_RATE_FEEDBACK(CARDINAL) = %s\n' "${r:-60}"
+    ;;
+  *)
+    printf '%s:  not found.\n' "${2:-atom}"
+    exit 1
+    ;;
+esac

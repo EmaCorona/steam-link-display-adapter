@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Test stub for gamescopectl. State lives in $STUB_STATE_DIR.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+mkdir -p "$SD"
+
+case "${1:-}" in
+  "")
+    if [[ "${STUB_NO_INFO:-0}" == 1 ]]; then exit 0; fi
+    printf 'gamescopectl version 3.16.28-ogc3+ (test stub)\n'
+    printf 'gamescope_control info:\n'
+    printf '  - Connector Name: %s\n' "${STUB_CONNECTOR:-DP-3}"
+    printf '  - Display Make: StubMake\n'
+    printf '  - Display Model: StubModel\n'
+    printf '  - Display Flags: 0x1\n'
+    printf '  - ValidRefreshRates: 60\n'
+    ;;
+  backend_set_dirty)
+    if [[ "${STUB_SET_DIRTY_FAIL:-0}" == 1 ]]; then exit 1; fi
+    if [[ "${STUB_SET_DIRTY_NOOP:-0}" == 1 ]]; then exit 0; fi
+    cfg="$HOME/.config/gamescope/modes.cfg"
+    if [[ -f "$cfg" ]]; then
+      line=$(head -n 1 "$cfg")
+      m=${line#*:}
+      m=${m%% *}
+      w=${m%%x*}
+      rest=${m#*x}
+      h=${rest%%@*}
+      r=${rest#*@}
+      printf '%sx%s@%s\n' "$w" "$h" "$r" >"$SD/mode"
+      printf 'drm: selecting connector %s\n' "${STUB_CONNECTOR:-DP-3}" >>"$SD/journal"
+      printf 'drm: selecting mode %sx%s@%sHz\n' "$w" "$h" "$r" >>"$SD/journal"
+      if [[ "$r" == 60 && -n "${STUB_REPICK_REFRESH:-}" && ! -f "$SD/repicked" ]]; then
+        : >"$SD/repicked"
+        printf '%sx%s@%s\n' "$w" "$h" "$STUB_REPICK_REFRESH" >"$SD/mode"
+        printf 'drm: selecting mode %sx%s@%sHz\n' "$w" "$h" "$STUB_REPICK_REFRESH" >>"$SD/journal"
+      fi
+    fi
+    ;;
+  drm_allow_dynamic_modes_for_external_display)
+    if [[ "${STUB_ALLOW_FAIL:-0}" == 1 ]]; then exit 1; fi
+    printf '%s\n' "${2:-}" >>"$SD/dynamic.log"
+    ;;
+  drm_sleep_external_screen)
+    printf '%s\n' "${2:-}" >>"$SD/sleep.log"
+    if [[ "${2:-}" == "1" && "${STUB_SLEEP_FAIL:-0}" == 1 ]]; then exit 1; fi
+    if [[ "${2:-}" == "0" && "${STUB_WAKE_FAIL:-0}" == 1 ]]; then exit 1; fi
+    ;;
+  backend_info)
+    printf 'Current Screen Type: External\n'
+    ;;
+  help)
+    printf 'backend_set_dirty: Dirty the backend state and re-poll\n'
+    ;;
+  *)
+    exit 0
+    ;;
+esac
+exit 0

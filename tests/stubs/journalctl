@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Test stub for journalctl: emits the recorded journal, honouring a -g/--grep
+# filter (ERE-compatible patterns) like the real journalctl message filter.
+set -u
+J="${STUB_STATE_DIR:?}/journal"
+pat=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  if [[ "${args[$i]}" == "-g" || "${args[$i]}" == "--grep" ]]; then
+    pat="${args[$((i + 1))]:-}"
+  fi
+  if [[ "${args[$i]}" == --grep=* ]]; then
+    pat="${args[$i]#--grep=}"
+  fi
+done
+if [[ -n "$pat" ]]; then
+  grep -E -- "$pat" "$J" 2>/dev/null || true
+else
+  cat "$J" 2>/dev/null || true
+fi

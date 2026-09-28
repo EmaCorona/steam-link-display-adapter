@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Test stub for pw-cli — only "ls Node" is used by the wrapper.
+set -u
+SD=${STUB_STATE_DIR:?}
+if [[ "${1:-}" == "ls" && "${2:-}" == "Node" ]]; then
+  if [[ "${STUB_STREAM_ACTIVE:-0}" == 1 || -f "$SD/stream-on" ]]; then
+    printf '\t\tnode.name = "steam-streaming-playback"\n'
+  fi
+fi
+exit 0

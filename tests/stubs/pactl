@@ -1,10 +1,37 @@
 #!/usr/bin/env bash
-# Test stub for pactl — only "list short sinks" is used by the wrapper.
+# Test stub for pactl — "list short sinks" and the event source "subscribe" are
+# the only modes used by the wrapper.
 set -u
 SD=${STUB_STATE_DIR:?}
+
+_sink_present() {
+  [[ "${STUB_STREAM_ACTIVE:-0}" == 1 || -f "$SD/stream-on" ]]
+}
+
 if [[ "${1:-}" == "list" && "${2:-}" == "short" && "${3:-}" == "sinks" ]]; then
-  if [[ "${STUB_STREAM_ACTIVE:-0}" == 1 || -f "$SD/stream-on" ]]; then
+  if _sink_present; then
     printf '42\tsteam-streaming-playback\tPipeWire\ts16le 2ch 48000Hz\tSUSPENDED\n'
   fi
+  exit 0
 fi
+
+if [[ "${1:-}" == "subscribe" ]]; then
+  # Emulate the PulseAudio/PipeWire event stream: emit a line on every sink
+  # state change, then keep listening until killed (the wrapper bounds each
+  # listen with `timeout`).
+  last=""
+  while :; do
+    if _sink_present; then cur="present"; else cur="absent"; fi
+    if [[ "$cur" != "$last" ]]; then
+      if [[ "$cur" == present ]]; then
+        printf "Event 'new' on sink #42\n"
+      else
+        printf "Event 'remove' on sink #42\n"
+      fi
+      last="$cur"
+    fi
+    sleep 0.05
+  done
+fi
+
 exit 0

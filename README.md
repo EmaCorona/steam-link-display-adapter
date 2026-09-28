@@ -10,7 +10,7 @@ senza commutare l'output, Steam cattura il desktop in 21:9 e il client riceve ba
 ## Come funziona (in breve)
 
 - Si inserisce come **Launch Option** del gioco: non modifica Steam, Proton, Wine, DXVK/VKD3D.
-- **Se una sessione Steam Link è attiva**: commuta l'output Gamescope a 1920×1200@60, **sincronizza il
+- **Se una sessione Steam Link è attiva** (o **sta iniziando**): commuta l'output Gamescope a 1920×1200@60, **sincronizza il
   server Xwayland #1** (quello del gioco) alla stessa geometria, spegne il monitor fisico e avvia il gioco.
 - **Alla fine** (uscita normale o SIGTERM/SIGINT/SIGHUP): riaccende il monitor, ripristina la modalità
   locale e la geometria di Xwayland #1.
@@ -84,13 +84,15 @@ display, sessione gamescope o gioco reale viene toccato.
 | `install.sh` | installazione utente |
 | `tests/` | suite hardware-free |
 | `DOCUMENTAZIONE-TECNICA.md` | dettagli implementativi, misure ed elenco degli scostamenti |
-| `ANALISI-FUNZIONALE.md`, `ANALISI-XWAYLAND-1.md` | analisi funzionali di riferimento |
+| `ANALISI-FUNZIONALE.md`, `ANALISI-XWAYLAND-1.md`, `ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md` | analisi funzionali di riferimento |
 
 ## Limiti noti
 
-- Il rilevamento della sessione Steam Link avviene **nell'istante del lancio**: se la sessione del client
-  non è ancora attiva il wrapper passa in passthrough e non tocca il display (dettagli e misure in
-  `DOCUMENTAZIONE-TECNICA.md`).
+- Il rilevamento della sessione Steam Link è **event-driven**: se il sink non è ancora presente il wrapper
+  apre una finestra bounded (default 5 s) e aggancia la **creazione** della sessione, quindi anche la
+  **prima connessione** segue lo stesso percorso delle successive. In **Desktop Mode** (nessuna sessione
+  gamescope) il lancio resta immediato; in Gaming Mode senza stream il lancio attende al più la finestra.
+  Dettagli e misure in `DOCUMENTAZIONE-TECNICA.md`.
 - Nessun cleanup dopo SIGKILL, panic o power loss; lo stato residuo viene recuperato al lancio successivo.
 - Lo streaming della sola **UI** (Big Picture) prima dell'avvio del gioco non viene commutato: il wrapper
   agisce dal lancio del gioco.

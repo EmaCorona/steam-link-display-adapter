@@ -12,6 +12,12 @@ Dal 2026-09-29 implementa anche [`ANALISI-XWAYLAND-1.md`](ANALISI-XWAYLAND-1.md)
 seconda analisi fornita, sha256 `8557c083162ed279e109368d96041c85f710e93e7c06288dcbbb123fb449994a`):
 **sincronizzazione esplicita di Xwayland #1** con l'output prima dell'avvio del gioco.
 
+Dal 2026-09-29 implementa inoltre
+[`ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md`](ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md) (copia identica della
+terza analisi fornita, sha256 `fb263ac439e20dd2f4fa9e4fa0987609d4b1d30d41991bc5660807f0c0ebe9b7`):
+**correzione della prima connessione Steam Link** — il rilevamento non dipende più da un marker storico,
+quindi la prima connessione segue lo stesso percorso delle successive (spec §5-§7, §14-§16).
+
 ## Installazione e uso (utente, senza root)
 
 ```bash
@@ -43,6 +49,10 @@ Comandi diretti:
   `steam-streaming-playback`): parte la pipeline — Gamescope/connettore → 1920×1200@60 → verifica →
   **sync Xwayland #1 → verifica root** → sleep monitor → gioco → ripristino completo (3440×1440@165 +
   Xwayland #1 riportato alla geometria locale).
+- **Steam Link in avvio** (sink non ancora presente): il rilevamento apre una **finestra bounded
+  event-driven** (`pactl subscribe`, con ri-verifica reale dello stato a ogni evento e a ogni scadenza di
+  poll, `STREAM_DETECT_WAIT_SECONDS` default 5s) e aggancia la **creazione** del sink. Nessun marker
+  storico richiesto: la prima connessione è trattata come tutte le altre (spec 2026-09-29).
 - **Fail-closed**: solo quando lo streaming è attivo; se la preparazione output **o** la sincronizzazione
   di Xwayland #1 fallisce, il gioco non parte (nessuno screen sleep).
 - **Recovery**: uno stato stantio viene recuperato **prima** della decisione, anche se Steam Link non è
@@ -115,7 +125,7 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
 | H6 — screen sleep/wake | fatto | `dpms Off` letto durante i run; wake al cleanup (T1 e run reali) |
 | R1–R5 — acceptance | parziale | run reali: gioco streamato e giocato (23:03, 23:06), uscita pulita + ripristino; resta il pattern di crash sugli avvii "puliti" (vedi sotto) |
 | Sync Xwayland #1 (spec 2026-09-29) | fatto (meccanismo) | probe live 2026-09-29: mapping via `GAMESCOPE_XWAYLAND_SERVER_ID`, `GAMESCOPE_XWAYLAND_MODE_CONTROL` applicata e ripristinata; da confermare in sessione Gaming Mode col client |
-| Unit test | fatto | `tests/run-tests.sh`: **28 test / 132 assert, tutti PASS** (sandbox + stub) |
+| Unit test | fatto | `tests/run-tests.sh`: **31 test / 170 assert, tutti PASS** (sandbox + stub); comprende `first_stream_no_previous_marker`, `first_stream_after_crash_leftover`, `stream_sequence` (§16-19) |
 
 ## Test live (2026-09-28 sera, Gaming Mode)
 
@@ -172,12 +182,14 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
 10. **Wrapper — gating su Steam Link (spec utente 2026-09-28).** La pipeline display parte solo con una
     sessione di streaming attiva (`steam_link_streaming_active()` nell'hook); altrimenti passthrough
     diretto del comando del gioco. Fail-closed solo ad streaming attivo; recovery con priorità sul bypass.
-11. **Hook — attesa anti-race nel rilevamento (spec utente, 2026-09-28).** Misurato: nei lanci verso
-    il client l'host (ri)stabilisce la sessione di stream ~1-2s **dopo** l'avvio del gioco (la precedente
-    può essere già chiusa) → il check al lancio la vedeva "inattiva" → bypass. Ora, con un ciclo di stream
-    recente (`STREAM_DETECT_WINDOW_SECONDS`, default 180s), il rilevamento attende fino a
-    `STREAM_DETECT_WAIT_SECONDS` (default 5s) che il sink/nodi compaiano; altrimenti bypass immediato.
-    I marker sono ristretti a Steam e al boot corrente (`-b -t steam`) con timestamp riverificato.
+11. **Hook — finestra di rilevamento anti-race, ora event-driven e senza marker (spec 2026-09-28,
+    riscritta dalla spec 2026-09-29).** Misurato: nei lanci verso il client l'host (ri)stabilisce la
+    sessione di stream ~1-2s **dopo** l'avvio del gioco → il check al lancio la vedeva "inattiva". La
+    vecchia attesa era però **condizionata a un marker storico** (`_sl_stream_cycle_recent`): alla prima
+    connessione, senza marker, si finiva in `return 1` → bypass → stream a 21:9. Ora la finestra si apre
+    quando il sink è assente, usa `pactl subscribe` (evento reale di creazione) con ri-verifica dello
+    stato a ogni evento e a ogni scadenza di poll, e dura al più `STREAM_DETECT_WAIT_SECONDS` (default 5s).
+    Il marker (journal + log Steam) resta **solo diagnostico** (`marker=` nell'evento `STREAM_WAIT_START`).
 12. **Hook/wrapper — sincronizzazione Xwayland #1 (spec 2026-09-29).** Aggiunti `set_xwayland_server_mode()`
     e le funzioni derivate; `prepare_stream_mode()` non completa più con la sola verifica DRM, ma richiede
     `OUTPUT VERIFIED AND XWAYLAND #1 VERIFIED`; `run_game` è gated dall'invariante temporale. Nuove chiavi
@@ -195,6 +207,40 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
     ripristino avviene ogni volta che il run possiede lo stato del display (snapshot proprio o stato
     stantio recuperato), con skip esplicito se il server #1 non esiste. Il campo `XWAYLAND_SYNCED` resta
     nel file di stato come informazione diagnostica.
+15. **Hook — prima connessione senza marker (spec 2026-09-29).** `_sl_wait_for_stream_signal()` sostituisce
+    l'attesa condizionata: se il sink è assente si osserva la sua **creazione** (`pactl subscribe`),
+    ri-verificando sempre lo stato reale del sink; fallback a polling bounded se `pactl` manca; nessuno
+    strumento di query → nessuna attesa. Eventi nuovi: `STREAM_SIGNAL_CURRENT`, `STREAM_WAIT_START`,
+    `STREAM_SIGNAL_EVENT`, `STREAM_SIGNAL_CONFIRMED`.
+16. **Hook — gate Gamescope per la finestra (spec §17).** In Desktop Mode (nessuna sessione Gamescope
+    raggiungibile via `gamescopectl`) la finestra **non** viene aperta: il lancio locale resta immediato.
+    La presenza di gamescope/gamescopectl **non** è mai letta come prova di una sessione Steam Link (§8);
+    il gate agisce solo quando il sink è assente e serve a soddisfare §17 (Desktop Mode → avvio immediato).
+17. **Wrapper — fasi di stato (spec §12).** Aggiunte `PREPARED` (output + Xwayland #1 verificati, prima di
+    `GAME_LAUNCH`) e `RESTORING` (inizio cleanup); il recovery continua a funzionare su qualunque fase. 
+## Valutazione watcher `systemd --user` (spec §9/§10/§24 terza correzione)
+
+La spec chiede di **valutare** un watcher persistente event-driven per eliminare ogni attesa nel gioco
+locale. Esito della valutazione (stato attuale: **non implementato**):
+
+- il watcher è l'unico modo di soddisfare insieme §9 ("Steam Link chiaramente non attivo → bypass") e §5
+  — senza di esso la finestra del wrapper è inevitabilmente aperta anche per un lancio locale, perché a
+  runtime non esiste, prima della creazione del sink, un segnale PipeWire che distingua "in avvio" da
+  "non attivo". L'unico segnale *live* pre-sink sarebbe la connessione del client Remote Play (il client
+  precede lo stream di ~20s), non ancora verificato su questa build;
+- un watcher che cambia la modalità del display va validato **in Gaming Mode con un client reale** prima
+  di essere abilitato; in questa finestra non c'è un client disponibile, quindi abilitarlo ora
+  significherebbe spedire non validato un servizio che tocca l'output;
+- vincoli già noti dalla skill `steam-remote-play` (`references/host-mode-watcher.md`): unit **session-bound**
+  (`WantedBy=gamescope-session-plus@<client>.service`), **mai** `graphical-session.target` (che Desktop Mode
+  raggiunge); `Restart=always`; guardia `pgrep -f '^/usr/bin/gamescope'`; stato condiviso con il wrapper
+  (stesso `STATE_DIR`/lock) e idempotenza "already prepared → verify only"; il cambio di mode va fatto
+  **prima** dell'inizio della cattura, mai mid-stream (altrimenti abort di Steam).
+
+Il wrapper implementa già il proprio lato dell'architettura §10: controllo finale, verifica di output e
+Xwayland #1, invariante `XWAYLAND1_SYNC_CONFIRMED < GAME_LAUNCH`, fail-closed. Un watcher, quando costruito,
+si innesterà su `STATE_DIR`/`lock` senza modificare questa logica (il wrapper non si fida ciecamente dello
+stato prodotto dal watcher, come richiesto da §24 quarta correzione).
 
 ## Verifica in sessione (Game Mode) — da completare
 

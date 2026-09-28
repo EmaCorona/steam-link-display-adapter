@@ -58,7 +58,7 @@ _sl_streaming_signals_present() {
     return 1
 }
 
-_sl_stream_cycle_recent() {
+_sl_stream_cycle_recent_journal() {
     # True when a Steam stream session started/stopped within
     # STREAM_DETECT_WINDOW_SECONDS (Steam's own journal markers, current boot,
     # identifier "steam" only — no other unit can trip this).
@@ -76,35 +76,160 @@ _sl_stream_cycle_recent() {
     (( marker_epoch >= since ))
 }
 
+_sl_stream_log_recent() {
+    # Same question answered from Steam's host log files, which survive a Steam
+    # restart: measured 2026-09-29, after Steam restarted at 00:38:18 the user
+    # journal held no "steam" stream marker for the 00:36:22-00:37:24 cycle
+    # (the 180 s window was empty -> the wrapper bypassed at 00:38:38 and the
+    # session streamed 21:9), while streaming_log.txt still carried both
+    # markers. Union with the journal check: either source may say "recent".
+    local window since f line ts newest=0 marker_epoch
+    window=${STREAM_DETECT_WINDOW_SECONDS:-180}
+    [[ "$window" =~ ^[0-9]+$ ]] || window=180
+    since=$(( $(date +%s) - window ))
+    for f in "${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}" \
+             "${STEAM_STREAM_LOG_PREV:-$HOME/.local/share/Steam/logs/streaming_log.previous.txt}"; do
+        [[ -f "$f" ]] || continue
+        line=$(grep -E 'Streaming started to|Deinitializing streaming' "$f" 2>/dev/null | tail -n1 || true)
+        [[ -n "$line" ]] || continue
+        # Host log format: "[2026-09-29 00:37:24][293.94...] <text>".
+        ts=$(sed -n 's/^\[\([0-9][0-9-]* [0-9:]*\)\].*/\1/p' <<<"$line")
+        [[ -n "$ts" ]] || continue
+        marker_epoch=$(date -d "$ts" +%s 2>/dev/null || printf '0')
+        (( marker_epoch > newest )) && newest=$marker_epoch
+    done
+    (( newest >= since ))
+}
+
+_sl_stream_cycle_recent() {
+    # Historical marker (journal + Steam host log). DIAGNOSTIC ONLY since the
+    # 2026-09-29 first-connection spec: it must never be a precondition for the
+    # detection window, because on a first connection no marker exists yet.
+    _sl_stream_cycle_recent_journal && return 0
+    _sl_stream_log_recent && return 0
+    return 1
+}
+
+_sl_event() {
+    # Emit a monotonic wrapper event when the wrapper's log_event exists (the
+    # hook is also sourced by the standalone restore helper, which has no file
+    # log); fall back to the plain log otherwise.
+    if declare -F log_event >/dev/null 2>&1; then
+        log_event "$1" "${2:-}"
+    else
+        log "$1${2:+ $2}"
+    fi
+}
+
+_sl_sink_present() {
+    _sl_streaming_signals_present
+}
+
+_sl_stream_history_marker() {
+    # Diagnostic only (spec §4).
+    if _sl_stream_cycle_recent; then printf 'recent'; else printf 'none'; fi
+}
+
+_sl_have_sink_query_tool() {
+    command -v pactl >/dev/null 2>&1 || command -v pw-cli >/dev/null 2>&1
+}
+
+_sl_gamescope_session_available() {
+    # True when a Gamescope session is reachable. Used only as the negative gate
+    # for the detection window in Desktop Mode (spec §17: immediate direct
+    # launch); it is never taken as proof of a Steam Link session (spec §8).
+    command -v gamescopectl >/dev/null 2>&1 || return 1
+    GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}" \
+        gamescopectl 2>/dev/null | grep -q 'Connector Name:'
+}
+
+_sl_wait_for_stream_signal() {
+    # Bounded, event-driven detection of a NEW Steam Link session (spec §5-§7):
+    # the sink is absent, so observe its creation as an event. `pactl subscribe`
+    # reacts almost immediately; the real sink state is re-verified after every
+    # event AND after every poll expiry, so a lost event or a dead subscriber
+    # cannot hide a live session (spec §6). No historical marker involved.
+    local max_wait=$1 deadline now remaining chunk chunk_s
+    deadline=$(( $(date +%s%N) / 1000000 + max_wait * 1000 ))
+    if command -v pactl >/dev/null 2>&1; then
+        while :; do
+            now=$(( $(date +%s%N) / 1000000 ))
+            if (( now >= deadline )); then break; fi
+            remaining=$(( deadline - now ))
+            chunk=${_SL_SUBSCRIBE_CHUNK_MS:-500}
+            [[ "$chunk" =~ ^[0-9]+$ ]] || chunk=500
+            if (( remaining < chunk )); then chunk=$remaining; fi
+            chunk_s=$(printf '%d.%03d' $(( chunk / 1000 )) $(( chunk % 1000 )))
+            while IFS= read -r line; do
+                case "$line" in
+                    *sink*|*server*)
+                        if _sl_sink_present; then
+                            _sl_event STREAM_SIGNAL_EVENT 'steam-streaming-playback'
+                            return 0
+                        fi
+                        ;;
+                esac
+            done < <(timeout "$chunk_s" pactl subscribe 2>/dev/null || true)
+            if _sl_sink_present; then
+                _sl_event STREAM_SIGNAL_EVENT 'steam-streaming-playback'
+                return 0
+            fi
+        done
+    else
+        # No event source available: bounded polling that still re-verifies the
+        # real sink state (never the mere receipt of an event).
+        while :; do
+            if _sl_sink_present; then return 0; fi
+            now=$(( $(date +%s%N) / 1000000 ))
+            if (( now >= deadline )); then break; fi
+            sleep "${POLL_INTERVAL_SECONDS:-0.10}"
+        done
+    fi
+    return 1
+}
+
 steam_link_streaming_active() {
     # Reliable, Gamescope-independent detection of an active Steam Link/Remote
     # Play session: for the whole duration of a stream the host loads a
     # "steam-streaming-playback" PipeWire sink (plus matching nodes) and unloads
-    # it at the end (measured 2026-09-28 from Steam logs/journal). Works in
-    # Desktop Mode too; no gamescope/gamescopectl/xprop requirements.
+    # it at the end (measured 2026-09-28 from Steam logs/journal).
+    #
+    # Three states are distinguished (spec §4): STREAM ACTIVE (sink present),
+    # STREAM STARTING (no sink -> observe the creation event, bounded window),
+    # NO STREAM. The window no longer depends on a previous session: on a first
+    # connection no marker exists, and the wrapper still reacts to the new sink
+    # (spec §5, §14, §16).
     #
     # Launch race (measured 2026-09-28): when the game is launched towards a
-    # live client, the host re-establishes the stream session ~1-2 s AFTER the
-    # game command starts (the previous session may already be torn down). When
-    # a stream cycle was recent, wait briefly (bounded) for the new session
-    # instead of mis-detecting "inactive".
-    local waited=0 max_wait
+    # live client, the host (re)establishes the session ~1-2 s AFTER the game
+    # command starts; the bounded window catches it.
+    local max_wait
     max_wait=${STREAM_DETECT_WAIT_SECONDS:-5}
     [[ "$max_wait" =~ ^[0-9]+$ ]] || max_wait=5
-    if _sl_streaming_signals_present; then
+
+    if _sl_sink_present; then
+        _sl_event STREAM_SIGNAL_CURRENT 'steam-streaming-playback'
         return 0
     fi
-    if ! _sl_stream_cycle_recent; then
+
+    # No sink and no way to observe one: nothing to detect.
+    _sl_have_sink_query_tool || return 1
+
+    # Desktop Mode / no Gamescope session: this pipeline cannot run there and no
+    # window is opened, so the local launch stays immediate (spec §17). The
+    # presence of gamescope tooling is never read as proof of a session (§8).
+    if [[ "${STREAM_DETECT_WINDOW_GAMESCOPE_ONLY:-1}" == 1 ]] && ! _sl_gamescope_session_available; then
+        _sl_event STREAM_NO_GAMESCOPE_SESSION
         return 1
     fi
-    log "Steam Link: recent stream cycle; waiting up to ${max_wait}s for the session"
-    while (( waited < max_wait * 3 )); do
-        sleep 0.33
-        if _sl_streaming_signals_present; then
-            return 0
-        fi
-        waited=$(( waited + 1 ))
-    done
+
+    _sl_event STREAM_WAIT_START "${max_wait}s marker=$(_sl_stream_history_marker)"
+    log "Steam Link: no session yet; waiting up to ${max_wait}s for a new session"
+    if _sl_wait_for_stream_signal "$max_wait"; then
+        _sl_event STREAM_SIGNAL_CONFIRMED 'steam-streaming-playback'
+        return 0
+    fi
+    log "Steam Link: no new session within ${max_wait}s"
     return 1
 }
 

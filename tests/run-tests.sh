@@ -326,6 +326,8 @@ test_bypass_stream_inactive() {
   run_wrapper true
   eq "bypass launches the game" "$RC" 0
   file_has "bypass logged" "$LOG" "bypassing display pipeline"
+  file_has "no gamescope session noted" "$LOG" "STREAM_NO_GAMESCOPE_SESSION"
+  file_lacks "no detection window in Desktop Mode" "$LOG" "STREAM_WAIT_START"
   cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
   eq "no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
@@ -380,6 +382,63 @@ test_stream_wait_expires_bypass() {
   file_has "wait logged" "$LOG" "waiting up to 1s"
   file_has "bypass logged" "$LOG" "bypassing display pipeline"
   eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+}
+
+test_first_stream_no_previous_marker() {
+  begin
+  unset STUB_STREAM_ACTIVE
+  # Spec §16: no sink, no previous Steam marker anywhere. A new session is
+  # created 1s after the wrapper starts and must be caught like any other.
+  printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
+  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  run_wrapper true
+  eq "first connection without marker runs the pipeline" "$RC" 0
+  file_has "window opened" "$LOG" "STREAM_WAIT_START"
+  file_has "sink event observed" "$LOG" "STREAM_SIGNAL_EVENT"
+  file_has "session confirmed" "$LOG" "STREAM_SIGNAL_CONFIRMED"
+  file_has "session detected" "$LOG" "Steam Link streaming session detected"
+  file_lacks "no bypass while the session starts" "$LOG" "bypassing display pipeline"
+  file_has "target mode verified" "$LOG" "Verified target mode: 1920x1200@60"
+  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
+  cmp_file "modes.cfg restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  cmp_file "xwayland #1 back to local" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
+}
+
+test_first_stream_after_crash_leftover() {
+  begin
+  unset STUB_STREAM_ACTIVE
+  # Spec §19: a crash left the display prepared and a stale state; the NEXT
+  # connection must work as a first connection, with no marker required.
+  seed_stale_state
+  run_wrapper true
+  eq "recovery run exit 0" "$RC" 0
+  file_has "recovery completed" "$LOG" "Stale-state recovery complete"
+  cmp_file "local mode restored after recovery" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  absent "state cleared after recovery" "$STATE_DIR/state"
+  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  run_wrapper true
+  eq "next connection runs the pipeline" "$RC" 0
+  file_has "stream detected" "$LOG" "Steam Link streaming session detected"
+  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
+  cmp_file "modes.cfg restored again" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+}
+
+test_stream_sequence() {
+  local i
+  for i in 1 2 3; do
+    begin
+    unset STUB_STREAM_ACTIVE
+    printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
+    ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+    run_wrapper true
+    eq "connection $i runs the pipeline" "$RC" 0
+    file_has "connection $i target reached" "$LOG" "OUTPUT_TARGET_REACHED"
+    file_has "connection $i xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
+    file_lacks "connection $i no bypass" "$LOG" "bypassing display pipeline"
+    cmp_file "connection $i modes.cfg restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+    cmp_file "connection $i xwayland1 local" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
+    end
+  done
 }
 
 test_xwayland_sync_order() {
@@ -473,6 +532,9 @@ TESTS=(
   recovery_before_bypass
   stream_wait_catches_race
   stream_wait_expires_bypass
+  first_stream_no_previous_marker
+  first_stream_after_crash_leftover
+  stream_sequence
   xwayland_sync_order
   xwayland_sync_failure_fails_closed
   xwayland_server_missing_fails_closed

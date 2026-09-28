@@ -14,6 +14,11 @@
 # verified at 1920x1200@60 the wrapper explicitly syncs Xwayland #1 to
 # 1920x1200 through GAMESCOPE_XWAYLAND_MODE_CONTROL and verifies its root
 # geometry; the game is launched only after XWAYLAND1_SYNC_CONFIRMED.
+# 2026-09-29 (spec "Correzione prima connessione"): the detection window in the
+# hook is event-driven (pactl subscribe) and no longer requires a previous
+# session marker, so the first connection follows the same path as the others.
+# The wrapper remains the final guard: it verifies output AND Xwayland #1 before
+# GAME_LAUNCH and never trusts an inherited "prepared" claim.
 #
 # IMPORTANT:
 # - This wrapper is intentionally fail-closed.
@@ -36,6 +41,10 @@ STREAM_ASPECT='16:10'
 STREAM_ALT_REFRESHES='164'
 STREAM_DETECT_WINDOW_SECONDS=180
 STREAM_DETECT_WAIT_SECONDS=5
+# Steam host logs used as an additional "recent stream cycle" source (the
+# journal loses its Steam markers across a Steam restart; these files do not).
+STEAM_STREAM_LOG="${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}"
+STEAM_STREAM_LOG_PREV="${STEAM_STREAM_LOG_PREV:-$HOME/.local/share/Steam/logs/streaming_log.previous.txt}"
 # Xwayland #1 (the game server) must be synchronized with the output before the
 # game starts: the DRM/output switch alone does not move it.
 STREAM_XWAYLAND_SERVER_INDEX=1
@@ -213,6 +222,10 @@ cleanup() {
     CLEANUP_DONE=1
 
     log "Cleanup started (state=$(state_phase || true))"
+    # RESTORING is the transitional phase of the state machine (spec §12).
+    if (( SETUP_DONE )); then
+        state_write 'RESTORING'
+    fi
 
     # Safety priority: wake the monitor first.
     if (( SCREEN_SLEEP_REQUESTED )); then
@@ -445,6 +458,9 @@ prepare_stream_mode() {
     XWAYLAND_SYNCED=1
     XWAYLAND_SYNC_CONFIRMED_NS=$(date +%s%N)
     log_event XWAYLAND1_SYNC_CONFIRMED "$(get_xwayland_server_mode "$STREAM_XWAYLAND_SERVER_INDEX" 2>/dev/null || true)"
+    # PREPARED: output + Xwayland #1 are both at the target, before GAME_LAUNCH
+    # (spec §12 sequence: OUT/XWAYLAND_READY -> PREPARED -> GAME_LAUNCH).
+    state_write 'PREPARED'
 
     SCREEN_SLEEP_REQUESTED=1
     if ! screen_sleep; then

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# Transient run state: the state file (phase + run metadata) used by the
+# workflow, the cleanup and the stale-state recovery.
+
+set -Eeuo pipefail
+
+state_write() {
+    local phase=$1
+    local tmp
+    tmp=$(mktemp --tmpdir="$STATE_DIR" '.state.XXXXXX')
+    {
+        printf 'VERSION=1\n'
+        printf 'PHASE=%s\n' "$phase"
+        printf 'MODES_BACKUP=%s\n' "$MODES_BACKUP"
+        printf 'MODES_EXISTED=%s\n' "$MODES_EXISTED"
+        printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$SCREEN_SLEEP_REQUESTED"
+        printf 'XWAYLAND_SYNCED=%s\n' "$XWAYLAND_SYNCED"
+        printf 'STREAM_MODE=%s\n' "${STREAM_MODE:-auto}"
+        printf 'CLIENT_WIDTH=%s\n' "${CLIENT_WIDTH:-}"
+        printf 'CLIENT_HEIGHT=%s\n' "${CLIENT_HEIGHT:-}"
+        printf 'CLIENT_FPS=%s\n' "${CLIENT_FPS:-}"
+        printf 'TARGET_WIDTH=%s\n' "${TARGET_WIDTH:-}"
+        printf 'TARGET_HEIGHT=%s\n' "${TARGET_HEIGHT:-}"
+        printf 'TARGET_REFRESH=%s\n' "${TARGET_REFRESH:-}"
+        printf 'TARGET_FPS=%s\n' "${TARGET_FPS:-}"
+        printf 'TARGET_SOURCE=%s\n' "${TARGET_SOURCE:-}"
+        printf 'TARGET_MODE_SPEC=%s\n' "${TARGET_MODE_SPEC:-}"
+    } >"$tmp"
+    mv -f -- "$tmp" "$STATE_FILE"
+}
+
+state_field() {
+    # Read one field from the state file (empty when unavailable).
+    [[ -f "$STATE_FILE" ]] || return 0
+    sed -n "s/^$1=//p" "$STATE_FILE" | head -n1
+}
+
+state_phase() {
+    # PHASE is the state-machine field (spec §12).
+    state_field PHASE
+}
+
+state_clear() {
+    rm -f -- "$STATE_FILE"
+}

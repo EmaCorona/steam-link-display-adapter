@@ -4,21 +4,21 @@ Wrapper di lancio Steam per **Bazzite Game Mode**: durante il gioco la sessione 
 geometria del client Steam Link — risolta **dinamicamente** dall'hint del client (fallback **1920×1200
 @ 60 Hz, 16:10**) — con monitor fisico spento, e al termine ripristina **3440×1440 @ 165** e monitor ON.
 
-Implementazione dell'analisi funzionale [`ANALISI-FUNZIONALE.md`](ANALISI-FUNZIONALE.md) (copia identica
+Implementazione dell'analisi funzionale [`ANALISI-FUNZIONALE.md`](../analysis/ANALISI-FUNZIONALE.md) (copia identica
 del documento fornito, sha256 `bb198ce2cf45267a8da3c4bce27af9f210b42c93111e8e801cab6aca6273b3e2`), con
 gli adattamenti d'ambiente richiesti dall'handoff (H2/H3/H7) e correzioni minime, tutte documentate sotto.
 
-Dal 2026-09-29 implementa anche [`ANALISI-XWAYLAND-1.md`](ANALISI-XWAYLAND-1.md) (copia identica della
+Dal 2026-09-29 implementa anche [`ANALISI-XWAYLAND-1.md`](../analysis/ANALISI-XWAYLAND-1.md) (copia identica della
 seconda analisi fornita, sha256 `8557c083162ed279e109368d96041c85f710e93e7c06288dcbbb123fb449994a`):
 **sincronizzazione esplicita di Xwayland #1** con l'output prima dell'avvio del gioco.
 
 Dal 2026-09-29 implementa inoltre
-[`ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md`](ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md) (copia identica della
+[`ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md`](../analysis/ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md) (copia identica della
 terza analisi fornita, sha256 `fb263ac439e20dd2f4fa9e4fa0987609d4b1d30d41991bc5660807f0c0ebe9b7`):
 **correzione della prima connessione Steam Link** — il rilevamento non dipende più da un marker storico,
 quindi la prima connessione segue lo stesso percorso delle successive (spec §5-§7, §14-§16).
 
-Dal 2026-09-29 implementa infine [`ANALISI-RISOLUZIONE-DINAMICA.md`](ANALISI-RISOLUZIONE-DINAMICA.md)
+Dal 2026-09-29 implementa infine [`ANALISI-RISOLUZIONE-DINAMICA.md`](../analysis/ANALISI-RISOLUZIONE-DINAMICA.md)
 (copia identica della quarta analisi fornita, sha256
 `3f7aaaa5719b34261ee971dac62127e62a91c06d8a98141e9047c5c5a7cb6ab7`): **risoluzione Gamescope dinamica in
 base al client** — il target non è più costante, ma risolto dall'hint `Maximum capture` del client contro i
@@ -170,7 +170,7 @@ stream: viene risolto una sola volta prima della preparazione (spec §38).
 ## Override risoluzione per-gioco: `--mode` (spec 2026-09-29)
 
 Estensione non invasiva del layer di input del target
-([`ANALISI-CLI-MODE.md`](ANALISI-CLI-MODE.md), sha256
+([`ANALISI-CLI-MODE.md`](../analysis/ANALISI-CLI-MODE.md), sha256
 `de4570646a6a0b58d723c4f8abe29acfaa05257410c18fe71cf24fe170796692`): le Steam Launch Options possono
 forzare il target per il singolo gioco. Non tocca rilevamento, prima connessione, resolver, Xwayland #1,
 cleanup, recovery.
@@ -367,3 +367,43 @@ Richiede una finestra in Gaming Mode con l'utente presente:
 - Fail-closed: nessuno screen sleep senza verifica reale del mode target.
 - Log: `~/.local/state/steam-link-display-adapter/wrapper.log`; stato: `state`; lock: `lock`; snapshot:
   `modes.cfg.backup`.
+
+## Struttura dei moduli (2026-09-29)
+
+Il codice è organizzato per responsabilità; l'entrypoint contiene solo path, configurazione,
+caricamento dei moduli e l'invocazione dell'orchestrazione.
+
+| Area | Contenuto |
+|---|---|
+| `lib/core/` | orchestrazione (`workflow.sh`, `restore.sh`, `report.sh`), CLI (`cli.sh`), default (`config.sh`), loader (`bootstrap.sh`) |
+| `lib/detection/` | `steam-link.sh` (sessione Steam Link, hint client), `gamescope.sh` (sessione Gamescope, atomi X) — sola lettura |
+| `lib/display/` | `connector.sh` (identità connettore/display), `mode.sh` (mode correnti/disponibili, switch, verifica, sleep/wake) |
+| `lib/resolution/` | `resolver.sh`: decide **quale** mode usare (il display lo applica) |
+| `lib/xwayland/` | `mode.sh`: discovery server, apply/verify, sincronizzazione #1 |
+| `lib/state/` | `state.sh` (file di stato), `snapshot.sh` (backup/saved mode di modes.cfg), `lock.sh` |
+| `lib/system/`, `lib/logging/` | `require_cmd`, log ed eventi |
+
+**Convenzione dei path** (unica, usata da tutti gli entrypoint):
+
+```text
+SCRIPT_DIR    directory dell'entrypoint
+PROJECT_ROOT  radice del progetto (checkout, oppure ~/.local se installato)
+LIB_ROOT      albero della libreria: PROJECT_ROOT/lib  oppure
+              PROJECT_ROOT/lib/steam-link-display-adapter  (installato)
+CONFIG_DIR    ~/.config/steam-link-display-adapter
+STATE_DIR     ~/.local/state/steam-link-display-adapter
+```
+
+Il loader (`lib/core/bootstrap.sh`) carica i moduli come percorsi relativi a `LIB_ROOT`: nessun modulo
+usa path relativi fragili (`../../`). Direzione delle dipendenze: `bin → core → moduli di dominio →
+primitive di sistema`.
+
+**Invariati dal refactor**: comandi, argomenti, flag, exit code, output significativo, nomi/default/
+semantica delle variabili di configurazione, detection, resolver, switching DRM, sincronizzazione
+Xwayland #1, recovery, cleanup, restore e locking. I file sotto `lib/` non sono eseguibili (caricati
+con `source`); gli entrypoint restano `0755`.
+
+**Scostamenti deliberati dalla struttura indicativa**: `system/filesystem.sh` non esiste (nessuna
+primitiva di filesystem riutilizzabile: `mkdir`/`mktemp` restano nei moduli che ne hanno la
+responsabilità) e l'entrypoint del report read-only è sottile ma non ha un modulo di dominio dedicato
+oltre a `lib/core/report.sh`.

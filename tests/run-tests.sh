@@ -11,9 +11,9 @@ set -u
 
 TESTS_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PKG_DIR=$(cd -- "$TESTS_DIR/.." && pwd)
-WRAPPER="$PKG_DIR/steam-link-display-adapter.sh"
-RESTORE="$PKG_DIR/steam-link-display-adapter-restore.sh"
-HOOK="$PKG_DIR/steam-link-display-adapter-hook.sh"
+WRAPPER="$PKG_DIR/bin/steam-link-display-adapter.sh"
+RESTORE="$PKG_DIR/bin/steam-link-display-adapter-restore.sh"
+LIB="$PKG_DIR/lib"
 STUBS="$TESTS_DIR/stubs"
 BASE_PATH="$PATH"
 FILTER=${1:-}
@@ -106,10 +106,11 @@ seed_stale_state_old_format() {
   mv "$STATE_DIR/state.tmp" "$STATE_DIR/state"
 }
 
-# Source the hook in a throwaway shell and call one of its functions.
+# Source the library in a throwaway shell and call one of its functions.
 hook_fn() {
   local fn=$1; shift
-  bash -c 'source "$1"; shift; "$@"' _ "$HOOK" "$fn" "$@" 2>/dev/null
+  bash -c 'LIB_ROOT="$1"; shift; source "$LIB_ROOT/core/bootstrap.sh"; fn="$1"; shift; "$fn" "$@"' \
+    _ "$LIB" "$fn" "$@" 2>/dev/null
 }
 
 # Like hook_fn, but keeps only the numeric result line (the hook also emits
@@ -1002,12 +1003,13 @@ test_rename_repo_namespace_clean() {
 
 test_rename_files_and_identity() {
   begin
-  exists "new wrapper source" "$PKG_DIR/steam-link-display-adapter.sh"
+  exists "new wrapper source" "$PKG_DIR/bin/steam-link-display-adapter.sh"
   absent "old wrapper source gone" "$PKG_DIR/$LEG_BRAND-wrapper.sh"
-  exists "new hook source" "$PKG_DIR/steam-link-display-adapter-hook.sh"
-  exists "new restore source" "$PKG_DIR/steam-link-display-adapter-restore.sh"
-  exists "new verify source" "$PKG_DIR/steam-link-display-adapter-verify-environment.sh"
-  exists "new conf example" "$PKG_DIR/steam-link-display-adapter.conf.example"
+  exists "library loader" "$PKG_DIR/lib/core/bootstrap.sh"
+  absent "no monolithic hook" "$PKG_DIR/lib/steam-link-display-adapter-hook.sh"
+  exists "new restore source" "$PKG_DIR/bin/steam-link-display-adapter-restore.sh"
+  exists "new verify source" "$PKG_DIR/bin/steam-link-display-adapter-verify-environment.sh"
+  exists "new conf example" "$PKG_DIR/config/steam-link-display-adapter.conf.example"
   absent "old conf example gone" "$PKG_DIR/$LEG_BRAND.conf.example"
   run_wrapper --help
   file_has "help shows new executable" "$STDERR" 'steam-link-display-adapter \[OPTIONS\] %command%'
@@ -1022,7 +1024,10 @@ test_rename_install_paths() {
   eq "installer runs" "$RC" 0
   exists "new executable installed" "$HOME/.local/bin/steam-link-display-adapter"
   absent "old executable not installed" "$HOME/.local/bin/$LEG_PROJ"
-  exists "new hook installed" "$HOME/.local/bin/steam-link-display-adapter-hook.sh"
+  exists "library tree installed" "$HOME/.local/lib/steam-link-display-adapter/core/bootstrap.sh"
+  exists "library module installed" "$HOME/.local/lib/steam-link-display-adapter/display/mode.sh"
+  absent "no single-file hook installed" "$HOME/.local/lib/steam-link-display-adapter/steam-link-display-adapter-hook.sh"
+  absent "hook not a public command" "$HOME/.local/bin/steam-link-display-adapter-hook.sh"
   absent "old hook not installed" "$HOME/.local/bin/$LEG_BRAND-hook.sh"
   exists "new verify installed" "$HOME/.local/bin/steam-link-display-adapter-verify-environment"
   exists "new restore installed" "$HOME/.local/bin/steam-link-display-adapter-restore"
@@ -1043,6 +1048,60 @@ test_rename_runtime_namespace() {
   absent "no legacy config dir" "$XDG_CONFIG_HOME/$LEG_BRAND"
   end
 }
+
+test_project_structure() {
+  # Layout regression guard (spec §13): the invariants that matter, not every
+  # internal file name.
+  local d e l
+  begin
+  exists "root readme" "$PKG_DIR/README.md"
+  exists "root installer" "$PKG_DIR/install.sh"
+  exists "test runner" "$PKG_DIR/tests/run-tests.sh"
+  exists "config template" "$PKG_DIR/config/steam-link-display-adapter.conf.example"
+  exists "technical doc" "$PKG_DIR/docs/technical/DOCUMENTAZIONE-TECNICA.md"
+  for d in analysis; do
+    exists "docs area $d" "$PKG_DIR/docs/$d"
+  done
+  # entrypoints
+  for e in steam-link-display-adapter.sh steam-link-display-adapter-restore.sh \
+           steam-link-display-adapter-verify-environment.sh; do
+    exists "entrypoint $e" "$PKG_DIR/bin/$e"
+    if [[ -x "$PKG_DIR/bin/$e" ]]; then
+      say_pass "entrypoint executable $e"
+    else
+      say_fail "entrypoint executable $e"
+    fi
+  done
+  # library: one loader plus one directory per responsibility
+  exists "library loader" "$PKG_DIR/lib/core/bootstrap.sh"
+  for d in core detection display logging resolution state system xwayland; do
+    exists "library area $d" "$PKG_DIR/lib/$d"
+  done
+  # library files are loaded with source: never executable
+  for l in core/bootstrap.sh core/workflow.sh logging/logging.sh detection/steam-link.sh \
+           display/mode.sh resolution/resolver.sh xwayland/mode.sh state/state.sh; do
+    if [[ -x "$PKG_DIR/lib/$l" ]]; then
+      say_fail "library not executable ${l##*/}"
+    else
+      say_pass "library not executable ${l##*/}"
+    fi
+  done
+  # analyses kept
+  local a
+  for a in ANALISI-FUNZIONALE.md ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md \
+           ANALISI-RISOLUZIONE-DINAMICA.md ANALISI-XWAYLAND-1.md \
+           ANALISI-CLI-MODE.md ANALISI-RIMOZIONE-FPS-CLI.md; do
+    exists "analysis $a" "$PKG_DIR/docs/analysis/$a"
+  done
+  # no duplicate / stale copies
+  absent "no root wrapper copy" "$PKG_DIR/steam-link-display-adapter.sh"
+  absent "no monolithic hook in lib" "$PKG_DIR/lib/steam-link-display-adapter-hook.sh"
+  absent "no stale public hook in bin" "$PKG_DIR/bin/steam-link-display-adapter-hook.sh"
+  absent "no root technical doc" "$PKG_DIR/DOCUMENTAZIONE-TECNICA.md"
+  absent "no root analysis" "$PKG_DIR/ANALISI-FUNZIONALE.md"
+  end
+}
+
 
 TESTS=(
   happy_path
@@ -1112,6 +1171,7 @@ TESTS=(
   rename_files_and_identity
   rename_install_paths
   rename_runtime_namespace
+  project_structure
 )
 
 echo "steam-link-display-adapter wrapper test suite"

@@ -1,254 +1,40 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
+# Launch workflow (orchestration).
+#
+# Coordinates the phases and owns nothing but the order:
+#   recover -> detect -> validate -> resolve -> precheck -> prepare -> run -> cleanup
+# Every concrete interaction with DRM, Xwayland, the state files or the logs is
+# delegated to the domain modules.
+#
 # Steam launch wrapper for Bazzite Game Mode / Gamescope.
 # Default target: 1920x1200 @ 60 Hz, 16:10, 60 FPS streaming (fallback); the
 # stream geometry is resolved dynamically from the Steam Link client hint when
 # STREAM_MODE=auto.
-# HANDOFF: environment-specific completion point is intentionally isolated in
-# steam-link-display-adapter-hook.sh. Handoff adaptations were applied there on 2026-09-28
-# (gamescopectl backend_set_dirty re-poll, journal mode readback); the remaining
-# in-session validation in Game Mode is tracked in the package README.
-# 2026-09-28 (spec utente): the display pipeline runs only when
-# steam_link_streaming_active() (hook) detects an active Steam Link session;
-# otherwise the game command is launched directly (no display changes).
-# 2026-09-29 (spec "Sincronizzazione Xwayland #1"): the output mode and the
-# Xwayland #1 (game) server mode are two distinct states. After the output is
-# verified at 1920x1200@60 the wrapper explicitly syncs Xwayland #1 to
-# 1920x1200 through GAMESCOPE_XWAYLAND_MODE_CONTROL and verifies its root
-# geometry; the game is launched only after XWAYLAND1_SYNC_CONFIRMED.
-# 2026-09-29 (spec "Correzione prima connessione"): the detection window in the
-# hook is event-driven (pactl subscribe) and no longer requires a previous
-# session marker, so the first connection follows the same path as the others.
-# The wrapper remains the final guard: it verifies output AND Xwayland #1 before
-# GAME_LAUNCH and never trusts an inherited "prepared" claim.
-# 2026-09-29 (spec "Risoluzione dinamica"): the geometry is no longer constant.
-# After detection the wrapper reads the client capture hint from Steam's host
-# log ("Maximum capture: WxH FPS", strictly recent), resolves it against the
-# host's advertised modes and drives OUTPUT and Xwayland #1 from the resulting
-# runtime TARGET_*; the configured STREAM_* geometry stays as fallback and
-# STREAM_MODE=fixed restores the previous behaviour.
-# 2026-09-29 (spec "Launch Options --mode"): a per-game target override can be
-# given in the Steam Launch Options (--mode auto|WxH). CLI > global
-# config > auto; an unavailable fixed mode fails closed before any change.
+# History of the applied specs (all implemented, none changed by this refactor):
+#   2026-09-28  display pipeline only while a Steam Link session is active
+#               (steam_link_streaming_active, detection/).
+#   2026-09-29  "Sincronizzazione Xwayland #1": the output mode and the Xwayland
+#               #1 (game) mode are two distinct states; #1 is synchronized and
+#               verified before GAME_LAUNCH (xwayland/).
+#   2026-09-29  "Correzione prima connessione": event-driven detection window,
+#               no historical marker required (detection/steam-link.sh).
+#   2026-09-29  "Risoluzione dinamica": the geometry is resolved from the client
+#               capture hint against the advertised host modes (resolution/).
+#   2026-09-29  "Launch Options --mode": per-game override, CLI > config > auto.
 #
 # IMPORTANT:
 # - This wrapper is intentionally fail-closed.
 # - It NEVER turns the physical display off unless the target Gamescope mode
 #   was verified first.
-# - The actual Gamescope integration lives in steam-link-display-adapter-hook.sh.
+# - The order of the phases below is the behaviour contract; do not reorder.
 
 set -Eeuo pipefail
 
-SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-HOOK="$SCRIPT_DIR/steam-link-display-adapter-hook.sh"
-USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter/config"
-
-CONNECTOR='DP-3'
-STREAM_WIDTH=1920
-STREAM_HEIGHT=1200
-STREAM_REFRESH=60
-STREAM_FPS=60
-STREAM_ASPECT='16:10'
-STREAM_ALT_REFRESHES='164'
-# Dynamic client resolution (spec: risoluzione Gamescope dinamica). 'auto' turns
-# the client's "Maximum capture" hint into the runtime target; 'fixed' keeps the
-# previous behaviour (STREAM_WIDTH/HEIGHT/REFRESH) and is the rollback switch.
-STREAM_MODE='auto'
-# The client capture hint is valid only if it is at most this many seconds old
-# (it must belong to the session just detected, never a previous client).
-STREAM_CAPTURE_HINT_MAX_AGE_SECONDS=10
-# Valid hint but no aspect-compatible host mode (spec §18): auto = use the
-# configured fallback only if its aspect matches the client; never = fail
-# closed; always = use the configured fallback regardless.
-STREAM_NO_COMPATIBLE_FALLBACK='auto'
-# Aspect-ratio compatibility tolerance for the mode resolver, in percent.
-STREAM_ASPECT_TOLERANCE=5
-STREAM_DETECT_WINDOW_SECONDS=180
-STREAM_DETECT_WAIT_SECONDS=5
-# Steam host logs used as an additional "recent stream cycle" source (the
-# journal loses its Steam markers across a Steam restart; these files do not).
-STEAM_STREAM_LOG="${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}"
-STEAM_STREAM_LOG_PREV="${STEAM_STREAM_LOG_PREV:-$HOME/.local/share/Steam/logs/streaming_log.previous.txt}"
-# Xwayland #1 (the game server) must be synchronized with the output before the
-# game starts: the DRM/output switch alone does not move it.
-STREAM_XWAYLAND_SERVER_INDEX=1
-STREAM_XWAYLAND_ALLOW_SUPERRES=0
-XWAYLAND_SCAN_MAX="${XWAYLAND_SCAN_MAX:-9}"
-XWAYLAND_EXTRA_DISPLAYS="${XWAYLAND_EXTRA_DISPLAYS:-}"
-LOCAL_WIDTH=3440
-LOCAL_HEIGHT=1440
-LOCAL_REFRESH=165
-MODE_TIMEOUT_SECONDS=5
-POLL_INTERVAL_SECONDS=0.10
-GAMESCOPE_DISPLAY="${DISPLAY:-}"
-GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
-LOG_FILE="$STATE_DIR/wrapper.log"
-STATE_FILE="$STATE_DIR/state"
-LOCK_FILE="$STATE_DIR/lock"
-MODES_FILE="$HOME/.config/gamescope/modes.cfg"
-
-if [[ -f "$USER_CONFIG" ]]; then
-    # shellcheck disable=SC1090
-    source "$USER_CONFIG"
-fi
-
-mkdir -p "$STATE_DIR" "$CONFIG_DIR"
-
-# shellcheck disable=SC1091
-source "$HOOK"
-
-log_file() {
-    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE"
-}
-
-log() {
-    log_file "$*"
-}
-
-# Monotonic, wrapper-relative event log (spec: STREAM_DETECTED, OUTPUT_PREPARE_START,
-# OUTPUT_TARGET_REACHED, XWAYLAND1_SYNC_REQUESTED, XWAYLAND1_SYNC_CONFIRMED,
-# GAME_LAUNCH). Format: "T<ms>ms <EVENT> [detail]".
 WRAPPER_START_NS=$(date +%s%N)
 XWAYLAND_SYNC_CONFIRMED_NS=0
 
-now_ms() {
-    printf '%s\n' $(( ($(date +%s%N) - WRAPPER_START_NS) / 1000000 ))
-}
-
-log_event() {
-    log "T$(now_ms)ms $1${2:+ $2}"
-}
-
-fail() {
-    log "ERROR: $*"
-    printf 'steam-link-display-adapter: ERROR: %s\n' "$*" >&2
-    return 1
-}
-
-lock_acquire() {
-    exec 9>"$LOCK_FILE"
-    flock -n 9
-}
-
-# --- Wrapper CLI (Steam Launch Options) --------------------------------------
-#
-# steam-link-display-adapter [OPTIONS] %command%
-#
-# Only the wrapper options BEFORE the game command are consumed; the game
-# command (and anything after it) is forwarded verbatim. Supported:
-#   --mode auto | WxH            (per-game target override)
-#   --help
-# A missing/duplicate/unknown option or an invalid --mode value aborts before
-# any display or state change.
-MODE_SOURCE=''
-MODE_SPEC=''
-CLI_WIDTH=''
-CLI_HEIGHT=''
-GAME_ARGS=()
-
-usage() {
-    cat >&2 <<'EOF'
-Usage:
-  steam-link-display-adapter [OPTIONS] %command%
-
-Options:
-  --mode auto        Use dynamic resolution based on the Steam Link client.
-  --mode WxH         Force the resolution and choose a compatible refresh automatically.
-  --help             Show this help.
-
-Examples:
-  steam-link-display-adapter --mode auto %command%
-  steam-link-display-adapter --mode 1920x1200 %command%
-EOF
-}
-
-parse_mode_value() {
-    # Validate a --mode value and fill the CLI request fields.
-    local v=$1
-    if [[ "$v" == auto ]]; then
-        MODE_SOURCE=auto; MODE_SPEC=auto
-        CLI_WIDTH=''; CLI_HEIGHT=''
-        return 0
-    fi
-    # Only "WxH": the refresh is never set from the CLI (it is a resolver
-    # concern), so any "@FPS" form is invalid (spec 2026-09-29).
-    if [[ "$v" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]]; then
-        MODE_SOURCE=cli; MODE_SPEC=$v
-        CLI_WIDTH=${BASH_REMATCH[1]}; CLI_HEIGHT=${BASH_REMATCH[2]}
-        return 0
-    fi
-    return 1
-}
-
-parse_wrapper_args() {
-    local mode_seen=0
-    while (( $# > 0 )); do
-        case "$1" in
-            --help)
-                usage; exit 0 ;;
-            --mode)
-                (( mode_seen )) && { fail "duplicate --mode option"; exit 64; }
-                [[ $# -ge 2 ]] || { fail "--mode requires a value"; exit 64; }
-                parse_mode_value "$2" || { fail "invalid --mode value: $2"; exit 64; }
-                mode_seen=1
-                shift 2 ;;
-            --mode=*)
-                (( mode_seen )) && { fail "duplicate --mode option"; exit 64; }
-                parse_mode_value "${1#--mode=}" || { fail "invalid --mode value: ${1#--mode=}"; exit 64; }
-                mode_seen=1
-                shift ;;
-            --)
-                shift; break ;;
-            -*)
-                fail "unknown wrapper option: $1"; exit 64 ;;
-            *)
-                break ;;
-        esac
-    done
-    GAME_ARGS=("$@")
-    [[ ${#GAME_ARGS[@]} -gt 0 ]] || { usage; exit 64; }
-}
-
-parse_wrapper_args "$@"
-
-state_write() {
-    local phase=$1
-    local tmp
-    tmp=$(mktemp --tmpdir="$STATE_DIR" '.state.XXXXXX')
-    {
-        printf 'VERSION=1\n'
-        printf 'PHASE=%s\n' "$phase"
-        printf 'MODES_BACKUP=%s\n' "$MODES_BACKUP"
-        printf 'MODES_EXISTED=%s\n' "$MODES_EXISTED"
-        printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$SCREEN_SLEEP_REQUESTED"
-        printf 'XWAYLAND_SYNCED=%s\n' "$XWAYLAND_SYNCED"
-        printf 'STREAM_MODE=%s\n' "${STREAM_MODE:-auto}"
-        printf 'CLIENT_WIDTH=%s\n' "${CLIENT_WIDTH:-}"
-        printf 'CLIENT_HEIGHT=%s\n' "${CLIENT_HEIGHT:-}"
-        printf 'CLIENT_FPS=%s\n' "${CLIENT_FPS:-}"
-        printf 'TARGET_WIDTH=%s\n' "${TARGET_WIDTH:-}"
-        printf 'TARGET_HEIGHT=%s\n' "${TARGET_HEIGHT:-}"
-        printf 'TARGET_REFRESH=%s\n' "${TARGET_REFRESH:-}"
-        printf 'TARGET_FPS=%s\n' "${TARGET_FPS:-}"
-        printf 'TARGET_SOURCE=%s\n' "${TARGET_SOURCE:-}"
-        printf 'TARGET_MODE_SPEC=%s\n' "${TARGET_MODE_SPEC:-}"
-    } >"$tmp"
-    mv -f -- "$tmp" "$STATE_FILE"
-}
-
-state_phase() {
-    [[ -f "$STATE_FILE" ]] || return 0
-    sed -n 's/^PHASE=//p' "$STATE_FILE" | head -n1
-}
-
-state_clear() {
-    rm -f -- "$STATE_FILE"
-}
-
-MODES_BACKUP="$STATE_DIR/modes.cfg.backup"
-MODES_EXISTED=0
+MODES_EXISTED=${MODES_EXISTED:-0}
 SETUP_DONE=0
 SCREEN_SLEEP_REQUESTED=0
 CLEANUP_DONE=0
@@ -256,6 +42,8 @@ GAME_EXIT_CODE=0
 BACKUP_TAKEN=0
 STALE_STATE_LOADED=0
 XWAYLAND_SYNCED=0
+LOCK_HELD=0
+GAME_PID=
 # Runtime target resolved from the client hint (spec §10: the configured
 # STREAM_* values are never overwritten; they remain the fallback).
 CLIENT_WIDTH=''
@@ -267,72 +55,6 @@ TARGET_REFRESH=''
 TARGET_FPS=''
 TARGET_SOURCE=''
 TARGET_MODE_SPEC=''
-
-backup_modes_file() {
-    rm -f -- "$MODES_BACKUP"
-    if [[ -f "$MODES_FILE" ]]; then
-        cp --reflink=auto -- "$MODES_FILE" "$MODES_BACKUP"
-        MODES_EXISTED=1
-    else
-        : >"$MODES_BACKUP"
-        MODES_EXISTED=0
-    fi
-    BACKUP_TAKEN=1
-    log "Backed up modes.cfg to $MODES_BACKUP (existed=$MODES_EXISTED)"
-}
-
-restore_modes_file() {
-    [[ -n "$MODES_BACKUP" ]] || return 0
-    if (( MODES_EXISTED )); then
-        mkdir -p "$(dirname -- "$MODES_FILE")"
-        local tmp
-        tmp=$(mktemp --tmpdir="$(dirname -- "$MODES_FILE")" '.modes.cfg.restore.XXXXXX')
-        cp --reflink=auto -- "$MODES_BACKUP" "$tmp"
-        mv -f -- "$tmp" "$MODES_FILE"
-    else
-        rm -f -- "$MODES_FILE"
-    fi
-    log "Restored modes.cfg"
-}
-
-write_saved_mode_for_description() {
-    local description=$1
-    local width=$2
-    local height=$3
-    local refresh=$4
-    local tmp dir
-
-    dir=$(dirname -- "$MODES_FILE")
-    mkdir -p "$dir"
-    tmp=$(mktemp --tmpdir="$dir" '.modes.cfg.stream.XXXXXX')
-
-    if [[ -f "$MODES_FILE" ]]; then
-        awk -v d="$description" -v w="$width" -v h="$height" -v r="$refresh" '
-            BEGIN { replaced=0 }
-            {
-                line=$0
-                split(line, a, ":")
-                if (index(line, ":") > 0 && a[1] == d) {
-                    if (!replaced) {
-                        printf "%s:%dx%d@%d\n", d, w, h, r
-                        replaced=1
-                    }
-                    next
-                }
-                print line
-            }
-            END {
-                if (!replaced)
-                    printf "%s:%dx%d@%d\n", d, w, h, r
-            }
-        ' "$MODES_FILE" >"$tmp"
-    else
-        printf '%s:%dx%d@%d\n' "$description" "$width" "$height" "$refresh" >"$tmp"
-    fi
-
-    mv -f -- "$tmp" "$MODES_FILE"
-    log "Configured saved mode: ${description}:${width}x${height}@${refresh}"
-}
 
 cleanup() {
     local rc=$?
@@ -739,49 +461,53 @@ run_game() {
     return 0
 }
 
-trap 'rc=$?; cleanup; exit "$rc"' EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+sl_wrapper_main() {
+    parse_wrapper_args "$@"
 
-LOCK_HELD=0
+    trap 'rc=$?; cleanup; exit "$rc"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
 
-# Stale-state recovery has priority over the bypass decision: a previous
-# interrupted run may have left the display in a modified state.
-if [[ -f "$STATE_FILE" ]]; then
-    if lock_acquire; then
-        LOCK_HELD=1
-        recover_stale_state || log "WARNING: stale-state recovery failed; continuing"
-    else
-        log "WARNING: another instance is active; skipping stale-state recovery"
-    fi
-fi
+    LOCK_HELD=0
 
-# Steam Link decision: run the display pipeline only when a streaming session
-# is actually active; otherwise bypass with a direct launch.
-if steam_link_streaming_active; then
-    if (( ! LOCK_HELD )); then
-        if ! lock_acquire; then
-            printf 'steam-link-display-adapter: another instance is already active\n' >&2
-            exit 73
+    # Stale-state recovery has priority over the bypass decision: a previous
+    # interrupted run may have left the display in a modified state.
+    if [[ -f "$STATE_FILE" ]]; then
+        if lock_acquire; then
+            LOCK_HELD=1
+            recover_stale_state || log "WARNING: stale-state recovery failed; continuing"
+        else
+            log "WARNING: another instance is active; skipping stale-state recovery"
         fi
-        LOCK_HELD=1
     fi
-    log "Steam Link streaming session detected: running display pipeline"
-    log_event STREAM_DETECTED
-    validate_config
-    resolve_stream_target || exit 1
-    precheck
-    prepare_stream_mode
-    if ! run_game "${GAME_ARGS[@]}"; then
-        exit 1
-    fi
-    exit "$GAME_EXIT_CODE"
-fi
 
-log "Steam Link not active: bypassing display pipeline (direct launch)"
-if (( LOCK_HELD )); then
-    flock -u 9 2>/dev/null || true
-    exec 9>&- 2>/dev/null || true
-fi
-exec "${GAME_ARGS[@]}"
+    # Steam Link decision: run the display pipeline only when a streaming session
+    # is actually active; otherwise bypass with a direct launch.
+    if steam_link_streaming_active; then
+        if (( ! LOCK_HELD )); then
+            if ! lock_acquire; then
+                printf 'steam-link-display-adapter: another instance is already active\n' >&2
+                exit 73
+            fi
+            LOCK_HELD=1
+        fi
+        log "Steam Link streaming session detected: running display pipeline"
+        log_event STREAM_DETECTED
+        validate_config
+        resolve_stream_target || exit 1
+        precheck
+        prepare_stream_mode
+        if ! run_game "${GAME_ARGS[@]}"; then
+            exit 1
+        fi
+        exit "$GAME_EXIT_CODE"
+    fi
+
+    log "Steam Link not active: bypassing display pipeline (direct launch)"
+    if (( LOCK_HELD )); then
+        flock -u 9 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+    fi
+    exec "${GAME_ARGS[@]}"
+}

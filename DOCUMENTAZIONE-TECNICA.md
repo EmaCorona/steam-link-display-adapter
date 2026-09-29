@@ -1,8 +1,8 @@
-# steamlink-display-wrapper
+# steam-link-display-adapter
 
-Wrapper di lancio Steam per **Bazzite Game Mode**: durante il gioco la sessione Gamescope rende
-**1920×1200 @ 60 Hz (16:10, target 60 FPS)** — il formato del client Steam Link — con monitor fisico
-spento, e al termine ripristina **3440×1440 @ 165** e monitor ON.
+Wrapper di lancio Steam per **Bazzite Game Mode**: durante il gioco la sessione Gamescope rende la
+geometria del client Steam Link — risolta **dinamicamente** dall'hint del client (fallback **1920×1200
+@ 60 Hz, 16:10**) — con monitor fisico spento, e al termine ripristina **3440×1440 @ 165** e monitor ON.
 
 Implementazione dell'analisi funzionale [`ANALISI-FUNZIONALE.md`](ANALISI-FUNZIONALE.md) (copia identica
 del documento fornito, sha256 `bb198ce2cf45267a8da3c4bce27af9f210b42c93111e8e801cab6aca6273b3e2`), con
@@ -18,26 +18,33 @@ terza analisi fornita, sha256 `fb263ac439e20dd2f4fa9e4fa0987609d4b1d30d41991bc56
 **correzione della prima connessione Steam Link** — il rilevamento non dipende più da un marker storico,
 quindi la prima connessione segue lo stesso percorso delle successive (spec §5-§7, §14-§16).
 
+Dal 2026-09-29 implementa infine [`ANALISI-RISOLUZIONE-DINAMICA.md`](ANALISI-RISOLUZIONE-DINAMICA.md)
+(copia identica della quarta analisi fornita, sha256
+`3f7aaaa5719b34261ee971dac62127e62a91c06d8a98141e9047c5c5a7cb6ab7`): **risoluzione Gamescope dinamica in
+base al client** — il target non è più costante, ma risolto dall'hint `Maximum capture` del client contro i
+mode disponibili sull'host; la configurazione statica resta come fallback e `STREAM_MODE=fixed` ripristina
+il comportamento precedente.
+
 ## Installazione e uso (utente, senza root)
 
 ```bash
 ./install.sh
 ```
 
-Installa in `~/.local/bin/` (`steam-link-virtual-display`, `steamlink-display-hook.sh`,
-`steamlink-display-verify-environment`, `steamlink-display-restore`) e crea
-`~/.config/steamlink-display/config` se assente.
+Installa in `~/.local/bin/` (`steam-link-display-adapter`, `steam-link-display-adapter-hook.sh`,
+`steam-link-display-adapter-verify-environment`, `steam-link-display-adapter-restore`) e crea
+`~/.config/steam-link-display-adapter/config` se assente.
 
 Launch Option Steam del gioco:
 
 ```text
-/home/USER/.local/bin/steam-link-virtual-display %command%
+/home/USER/.local/bin/steam-link-display-adapter %command%
 ```
 
 Comandi diretti:
 
-- `steamlink-display-verify-environment` — diagnostica read-only dell'ambiente;
-- `steamlink-display-restore` — recovery manuale conservativo (mai streaming mode);
+- `steam-link-display-adapter-verify-environment` — diagnostica read-only dell'ambiente;
+- `steam-link-display-adapter-restore` — recovery manuale conservativo (mai streaming mode);
 - `bash tests/run-tests.sh` — suite hardware-free (sandbox + stub; nessun display reale toccato).
 
 ## Comportamento (gating su Steam Link, spec utente 2026-09-28)
@@ -106,12 +113,91 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
   `wait_for_stream_xwayland_mode` **CONFIRMED**.
 - **misurato**: riportando l'output a 3440x1440@165, gamescope aggiorna **solo #0** — #1 resta alla
   geometria di streaming (la premessa della spec è confermata dal vivo).
-- **gap trovato e corretto**: `steamlink-display-restore` ripristinava l'output ma lasciava #1 a
+- **gap trovato e corretto**: `steam-link-display-adapter-restore` ripristinava l'output ma lasciava #1 a
   1920x1200, perché il ripristino era gated sul campo `XWAYLAND_SYNCED` — assente in uno stato scritto
   da una build precedente. Ora cleanup/recovery/restore helper ripristinano #1 **ogni volta che lo stato
   del display è di proprietà del run** (snapshot proprio o stato stantio recuperato), indipendentemente
   dal campo; se il server #1 non esiste, l'operazione viene saltata e loggata come tale. Test dedicato
   sullo stato senza campo.
+
+## Risoluzione dinamica in base al client (spec 2026-09-29)
+
+La geometria di streaming non è più una costante: è una **sorgente del target** accanto a configurazione e
+fallback (spec §45). Pipeline invariata (rilevamento event-driven, fail-closed, sync Xwayland #1, cleanup,
+recovery): cambia solo il valore di `TARGET_WIDTH/TARGET_HEIGHT/TARGET_REFRESH`.
+
+Sequenza dopo il rilevamento (spec §5, §7):
+
+```
+STREAM_SIGNAL_CONFIRMED
+      ↓
+CLIENT_HINT <W>x<H>@<FPS>          (get_latest_stream_capture_hint)
+      ↓
+MODE RESOLVER                (resolve_target_mode)
+      ↓
+TARGET_MODE_RESOLVED ... source=steam_capture_hint|fallback|fixed
+      ↓
+precheck → prepare_stream_mode (OUTPUT + XWAYLAND1) → GAME_LAUNCH
+```
+
+**Hint client** — `get_latest_stream_capture_hint()` legge l'ultima riga `Maximum capture: WxH FPS` dalla
+coda di `STEAM_STREAM_LOG` (poi `STEAM_STREAM_LOG_PREV`), scansionando in ordine inverso. Vale solo se il suo
+timestamp è entro `STREAM_CAPTURE_HINT_MAX_AGE_SECONDS` (default **10 s**): la freschezza — **non**
+`STREAM_DETECT_WINDOW_SECONDS`, che resta il rilevamento storico della sessione — garantisce che l'hint
+appartenga alla sessione corrente e non a un client precedente (spec §4, §28). FPS frazionari arrotondati
+(`89.00` → `89`).
+
+**Resolver** — `resolve_target_mode()` normalizza ogni candidate in width/height/refresh/aspect/pixels e
+applica la priorità deterministica: aspect compatibile (`STREAM_ASPECT_TOLERANCE`, default 5%) → risoluzione
+esatta → refresh sufficiente per gli FPS del client (>= FPS, con cadenza multipla preferita) → minore
+differenza di pixel → refresh più alto. Un mode con più pixel non viene mai preferito a uno esatto/compatibile
+(spec §14, §16-§18). Fonti dei mode, in ordine: `GAMESCOPE_DISPLAY_MODE_LIST_EXTERNAL`, `modes.cfg`, kernel
+ModeDB del connettore (spec §12).
+
+**Assenza di mode compatibile** (spec §18): `STREAM_NO_COMPATIBLE_FALLBACK` — `auto` (default) usa il
+fallback solo se il suo aspect è compatibile con il client, `never` fail-closed, `always` usa comunque il
+fallback. Il fallback deve poi comunque superare `precheck`, quindi in `auto` il ramo sicuro è il fail-closed.
+
+**Configurazione e stato** — `STREAM_WIDTH/HEIGHT/REFRESH/FPS` non vengono mai sovrascritti: sono il
+fallback (o il target con `STREAM_MODE=fixed`). Il target risolto vive in `TARGET_*`/`CLIENT_*` e viene
+scritto nel file di stato per la ricostruzione post-crash (spec §11). Il target è **immutabile** durante lo
+stream: viene risolto una sola volta prima della preparazione (spec §38).
+
+**Eventi aggiunti** nel `wrapper.log`: `CLIENT_HINT <W>x<H>@<FPS>|unavailable|stale`,
+`TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint|fallback|fixed`,
+`TARGET_MODE_NO_COMPATIBLE_HOST_MODE`.
+
+## Override risoluzione per-gioco: `--mode` (spec 2026-09-29)
+
+Estensione non invasiva del layer di input del target
+([`ANALISI-CLI-MODE.md`](ANALISI-CLI-MODE.md), sha256
+`de4570646a6a0b58d723c4f8abe29acfaa05257410c18fe71cf24fe170796692`): le Steam Launch Options possono
+forzare il target per il singolo gioco. Non tocca rilevamento, prima connessione, resolver, Xwayland #1,
+cleanup, recovery.
+
+Contratto: `--mode auto | WxH`. Solo i parametri **prima** del comando del gioco sono consumati;
+il resto e' inoltrato verbatim (`GAME_ARGS`). Valori non validi, `--mode` duplicato, opzione sconosciuta o
+`--mode` senza valore -> uscita non-zero **prima** di qualsiasi modifica (nessun tocco a output, modes.cfg,
+Xwayland, monitor o stato). `--help` stampa l'uso senza effetti.
+
+Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
+
+| Sorgente | WIDTH/HEIGHT | REFRESH | TARGET_SOURCE | MODE_SOURCE |
+|---|---|---|---|---|
+| `--mode auto` | dal client hint | dal resolver | `steam_capture_hint` | `auto` |
+| `--mode WxH` | forzati | dal resolver (solo geometria) | `cli` | `cli` |
+| `STREAM_MODE=fixed` (no CLI) | `STREAM_*` | `STREAM_REFRESH` | `fixed` | `config` |
+| fallback (auto, hint assente) | `STREAM_*` | `STREAM_REFRESH` | `fallback` | `fallback` |
+
+- `WxH` e' un vincolo **duro** sulla geometria: il resolver sceglie solo il refresh; se la geometria non e'
+  disponibile -> `TARGET_MODE_UNAVAILABLE` + fail-closed.
+- Il refresh **non** e' specificabile dalla CLI: `--mode WxH@FPS` e' **invalido** e viene rifiutato prima
+  di qualsiasi modifica (spec 2026-09-29). `TARGET_MODE_SPEC` vale quindi `WxH`, mentre `TARGET_REFRESH`
+  porta il refresh scelto dal resolver; la distinzione richiesta utente / mode applicato resta visibile nei log.
+- Il client hint **non** viene letto nelle modalita' CLI (spec §23); il target resta immutabile durante lo
+  stream.
+- Nuove righe di log: `MODE_SOURCE=`, `CLI_MODE=`, `TARGET_MODE=`, eventi `CLI_TARGET_MODE`,
+  `TARGET_MODE_UNAVAILABLE`. Stato: `TARGET_MODE_SPEC`.
 
 ## Stato delle verifiche (Definition of Done §38)
 
@@ -125,7 +211,7 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
 | H6 — screen sleep/wake | fatto | `dpms Off` letto durante i run; wake al cleanup (T1 e run reali) |
 | R1–R5 — acceptance | parziale | run reali: gioco streamato e giocato (23:03, 23:06), uscita pulita + ripristino; resta il pattern di crash sugli avvii "puliti" (vedi sotto) |
 | Sync Xwayland #1 (spec 2026-09-29) | fatto (meccanismo) | probe live 2026-09-29: mapping via `GAMESCOPE_XWAYLAND_SERVER_ID`, `GAMESCOPE_XWAYLAND_MODE_CONTROL` applicata e ripristinata; da confermare in sessione Gaming Mode col client |
-| Unit test | fatto | `tests/run-tests.sh`: **31 test / 170 assert, tutti PASS** (sandbox + stub); comprende `first_stream_no_previous_marker`, `first_stream_after_crash_leftover`, `stream_sequence` (§16-19) |
+| Unit test | fatto | `tests/run-tests.sh`: **32 test / 237 assert, tutti PASS** (sandbox + stub); comprende hint (parse/invalid/stale), resolver (exact/aspect/16:9/FPS/no-compatible), sequenze multi-client, prima connessione con hint, regressione geometrica (§32-§34 del quarto documento) |
 
 ## Test live (2026-09-28 sera, Gaming Mode)
 
@@ -217,7 +303,25 @@ Sessione Gaming Mode attiva (gamescope PID 447948, `--xwayland-count 2`):
     La presenza di gamescope/gamescopectl **non** è mai letta come prova di una sessione Steam Link (§8);
     il gate agisce solo quando il sink è assente e serve a soddisfare §17 (Desktop Mode → avvio immediato).
 17. **Wrapper — fasi di stato (spec §12).** Aggiunte `PREPARED` (output + Xwayland #1 verificati, prima di
-    `GAME_LAUNCH`) e `RESTORING` (inizio cleanup); il recovery continua a funzionare su qualunque fase. 
+    `GAME_LAUNCH`) e `RESTORING` (inizio cleanup); il recovery continua a funzionare su qualunque fase.
+18. **Hook — hint client e resolver mode (spec 2026-09-29 sulla risoluzione dinamica).** Aggiunti
+    `get_latest_stream_capture_hint()` (coda del log Steam, scansione inversa, freschezza con
+    `STREAM_CAPTURE_HINT_MAX_AGE_SECONDS`), `get_host_mode_list()` (atomo → `modes.cfg` → kernel ModeDB),
+    `resolve_target_mode()` (priorità aspect/esattezza/FPS/pixel), `sl_aspect_compatible()`/`sl_aspect_milli()`.
+    `mode_list_contains()` è ora generica (non più vincolata a `STREAM_WIDTHxSTREAM_HEIGHT`) e consulta
+    anche `modes.cfg`; `is_target_mode_active()` e le funzioni Xwayland usano `TARGET_*`.
+19. **Wrapper — target runtime e fallback (spec §8-§10, §30).** Nuove chiavi `STREAM_MODE` (`auto`/`fixed`,
+    default `auto`), `STREAM_CAPTURE_HINT_MAX_AGE_SECONDS` (10), `STREAM_NO_COMPATIBLE_FALLBACK` (`auto`),
+    `STREAM_ASPECT_TOLERANCE` (5). `resolve_stream_target()` risolve il target dopo il rilevamento e prima del
+    precheck; la validazione di config è stata resa coerente (`STREAM_ASPECT` deve corrispondere a
+    `STREAM_WIDTH:STREAM_HEIGHT`) perché `fixed` possa cambiare geometria. Il file di stato porta
+    `CLIENT_*`/`TARGET_*`/`STREAM_MODE`; il cleanup azzera il target client (cache valida solo per la sessione
+    corrente, spec §28).
+20. **Wrapper — override `--mode` per-gioco (spec 2026-09-29).** Parser esplicito prima di qualsiasi azione
+    (`parse_wrapper_args`/`parse_mode_value`): consuma `--mode`/`--help` davanti al comando del gioco e
+    inoltra il resto verbatim; `resolve_cli_target()` risolve il target da CLI (auto/WxH) senza
+    leggere il client hint, con fail-closed sui mode non disponibili; nuova chiave di stato
+    `TARGET_MODE_SPEC`. Il resolver e il lifecycle restano gli stessi (nessun secondo resolver). 
 ## Valutazione watcher `systemd --user` (spec §9/§10/§24 terza correzione)
 
 La spec chiede di **valutare** un watcher persistente event-driven per eliminare ogni attesa nel gioco
@@ -246,17 +350,20 @@ stato prodotto dal watcher, come richiesto da §24 quarta correzione).
 
 Richiede una finestra in Gaming Mode con l'utente presente:
 
-1. `~/.local/bin/steamlink-display-verify-environment` → raccolta ambiente (connector, gamescopectl, atomi);
-2. lanciare un gioco con la Launch Option → attesi: monitor OFF, mode `1920x1200@60` (journal:
-   `drm: selecting mode 1920x1200@60Hz`), `wrapper.log` con "Verified target mode";
-3. lato Steam: `~/.local/share/Steam/logs/streaming_log.txt` → `setting capture size 1920x1200` e
-   `CLIENT: Video rect: 1920x1200 at 0,0`;
+1. `~/.local/bin/steam-link-display-adapter-verify-environment` → raccolta ambiente (connector, gamescopectl, atomi,
+   `STREAM_MODE`, ultime righe `Maximum capture` del log Steam);
+2. connettere il client e lanciare un gioco con la Launch Option → attesi: `CLIENT_HINT <W>x<H>@<FPS>` e
+   `TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint` nel `wrapper.log`, monitor OFF, mode target nel
+   journal (`drm: selecting mode <target>Hz`);
+3. lato Steam: `~/.local/share/Steam/logs/streaming_log.txt` → `setting capture size <target>` e
+   `CLIENT: Video rect: <target> at 0,0` coerenti con il target risolto;
 4. uscire dal gioco → monitor ON, `3440x1440@165`, `wrapper.log` con "Verified local mode", stato pulito;
-5. ripetere per R3 (SIGTERM/SIGINT/SIGHUP) e stale-state sul campo.
+5. ripetere con un secondo client di geometria diversa (target ricalcolato) e per R3 (SIGTERM/SIGINT/SIGHUP)
+   e stale-state sul campo.
 
 ## Note operative
 
 - Non toccati di proposito: `~/.config/gamescope/{bootstrap.cfg,edid.bin,modes.cfg}` (preesistenti).
 - Fail-closed: nessuno screen sleep senza verifica reale del mode target.
-- Log: `~/.local/state/steamlink-display/wrapper.log`; stato: `state`; lock: `lock`; snapshot:
+- Log: `~/.local/state/steam-link-display-adapter/wrapper.log`; stato: `state`; lock: `lock`; snapshot:
   `modes.cfg.backup`.

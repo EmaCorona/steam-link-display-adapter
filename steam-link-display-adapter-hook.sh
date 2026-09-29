@@ -274,18 +274,78 @@ get_gamescope_mode_list() {
     printf '%s\n' "$list"
 }
 
+# --- Dynamic client resolution (spec: risoluzione Gamescope dinamica) --------
+#
+# The stream geometry is no longer a constant: Steam writes the client capture
+# ceiling in its host log ("Maximum capture: WxH FPS") a few ms before creating
+# the streaming sink, and the wrapper turns that hint into a runtime target
+# (TARGET_WIDTH/HEIGHT/REFRESH), resolved against the modes the host really
+# advertises. The configured STREAM_* values remain the fallback.
+
+sl_aspect_milli() {
+    # Aspect ratio in thousandths (integer math): 1280x800 -> 1600.
+    local w=$1 h=$2
+    [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ ]] || return 1
+    (( w > 0 && h > 0 )) || return 1
+    printf '%s\n' $(( w * 1000 / h ))
+}
+
+sl_aspect_compatible() {
+    # True when two resolutions have a compatible aspect ratio within
+    # STREAM_ASPECT_TOLERANCE percent (default 5).
+    local aw=$1 ah=$2 bw=$3 bh=$4 tol a b d
+    a=$(sl_aspect_milli "$aw" "$ah") || return 1
+    b=$(sl_aspect_milli "$bw" "$bh") || return 1
+    tol=${STREAM_ASPECT_TOLERANCE:-5}
+    [[ "$tol" =~ ^[0-9]+$ ]] || tol=5
+    d=$(( a - b )); (( d < 0 )) && d=$(( -d ))
+    (( d <= tol * 10 ))
+}
+
+get_host_mode_list() {
+    # Mode candidates the host really advertises, one "WxH" or "WxH@R" per line.
+    # Sources in order (spec §12): Gamescope X atom, modes.cfg, kernel ModeDB.
+    local list line mode found=0 modes_file f
+    if list=$(get_gamescope_mode_list) && [[ -n "$list" ]]; then
+        printf '%s\n' "$list" | tr ' ' '\n' | grep -E '^[0-9]+x[0-9]+(@[0-9]+)?$' | sort -u
+        return 0
+    fi
+    modes_file="${MODES_FILE:-$HOME/.config/gamescope/modes.cfg}"
+    if [[ -f "$modes_file" ]]; then
+        while IFS= read -r line; do
+            mode=$(sed -n 's/^[^:]*:\([0-9]\+x[0-9]\+@[0-9]\+\).*/\1/p' <<<"$line")
+            [[ -n "$mode" ]] && { printf '%s\n' "$mode"; found=1; }
+        done <"$modes_file"
+    fi
+    for f in ${DRM_MODES_GLOB:-/sys/class/drm/card*-${CONNECTOR:-}/modes}; do
+        [[ -f "$f" ]] || continue
+        while IFS= read -r mode; do
+            [[ "$mode" =~ ^[0-9]+x[0-9]+$ ]] && { printf '%s\n' "$mode"; found=1; }
+        done <"$f"
+    done
+    (( found )) && return 0
+    return 1
+}
+
 mode_list_contains() {
-    local wanted=$1 list res f
+    local wanted=$1 list line mode res f modes_file
     if list=$(get_gamescope_mode_list) && [[ -n "$list" ]]; then
         tr ' ' '\n' <<<"$list" | grep -Fxq "$wanted"
         return $?
     fi
-    # No X atom on this build: fall back to the kernel ModeDB of the connector.
-    # The refresh cannot be read here; the exact target refresh is proven by the
-    # post-switch verification before any screen sleep.
+    # No X atom on this build: check modes.cfg, then fall back to the kernel
+    # ModeDB of the connector. The refresh cannot be read back from the ModeDB;
+    # the exact target refresh is proven by the post-switch verification before
+    # any screen sleep.
+    modes_file="${MODES_FILE:-$HOME/.config/gamescope/modes.cfg}"
+    if [[ -f "$modes_file" ]]; then
+        while IFS= read -r line; do
+            mode=$(sed -n 's/^[^:]*:\([0-9]\+x[0-9]\+@[0-9]\+\).*/\1/p' <<<"$line")
+            [[ "$mode" == "$wanted" ]] && return 0
+        done <"$modes_file"
+    fi
     log "mode list: Gamescope X atom unavailable; checking kernel ModeDB for $CONNECTOR"
     res=${wanted%@*}
-    [[ "$res" == "${STREAM_WIDTH}x${STREAM_HEIGHT}" ]] || return 1
     for f in ${DRM_MODES_GLOB:-/sys/class/drm/card*-$CONNECTOR/modes}; do
         [[ -f "$f" ]] || continue
         if grep -qx -- "$res" "$f"; then
@@ -293,6 +353,109 @@ mode_list_contains() {
         fi
     done
     return 1
+}
+
+get_latest_stream_capture_hint() {
+    # Read the most recent client capture hint from Steam's host log.
+    # Prints "WIDTH HEIGHT FPS" on success (exit 0); returns 1 with no output
+    # when the hint is unavailable or older than
+    # STREAM_CAPTURE_HINT_MAX_AGE_SECONDS. The hint belongs to the CURRENT
+    # session only: freshness (never STREAM_DETECT_WINDOW_SECONDS) decides, so
+    # a previous session's line cannot leak into a new client (spec §4, §28).
+    local max_age=${STREAM_CAPTURE_HINT_MAX_AGE_SECONDS:-10}
+    [[ "$max_age" =~ ^[0-9]+$ ]] || max_age=10
+    local now f line w h fps ts ts_epoch age stale=0
+    now=$(date +%s)
+    for f in "${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}" \
+             "${STEAM_STREAM_LOG_PREV:-$HOME/.local/share/Steam/logs/streaming_log.previous.txt}"; do
+        [[ -f "$f" ]] || continue
+        # Scan the tail in reverse order: the first valid line wins.
+        while IFS= read -r line; do
+            [[ "$line" == *"Maximum capture:"* ]] || continue
+            w=$(sed -n 's/.*Maximum capture: *\([0-9]\+\)x\([0-9]\+\) .*/\1/p' <<<"$line")
+            h=$(sed -n 's/.*Maximum capture: *\([0-9]\+\)x\([0-9]\+\) .*/\2/p' <<<"$line")
+            fps=$(sed -n 's/.*Maximum capture: *[0-9]\+x[0-9]\+ \([0-9][0-9.]*\) *FPS.*/\1/p' <<<"$line")
+            [[ "$w" =~ ^[0-9]+$ && "$h" =~ ^[0-9]+$ && -n "$fps" ]] || continue
+            ts=$(sed -n 's/^\[\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\} [0-9]\{2\}:[0-9]\{2\}:[0-9]\{2\}\)\].*/\1/p' <<<"$line")
+            [[ -n "$ts" ]] || continue
+            ts_epoch=$(date -d "$ts" +%s 2>/dev/null || true)
+            [[ -n "$ts_epoch" ]] || continue
+            age=$(( now - ts_epoch ))
+            (( age < 0 )) && age=0
+            if (( age > max_age )); then stale=1; continue; fi
+            fps=$(awk -v v="$fps" 'BEGIN { printf "%d", v + 0.5 }')
+            _sl_event CLIENT_HINT "${w}x${h}@${fps}"
+            printf '%s %s %s\n' "$w" "$h" "$fps"
+            return 0
+        done < <(tail -c 262144 -- "$f" 2>/dev/null | awk '{a[NR]=$0} END {for (i=NR;i>=1;i--) print a[i]}')
+    done
+    if (( stale )); then _sl_event CLIENT_HINT stale; else _sl_event CLIENT_HINT unavailable; fi
+    return 1
+}
+
+resolve_target_mode() {
+    # Resolve a client hint against the host's advertised modes (spec §13-§18).
+    # Args: CLIENT_WIDTH CLIENT_HEIGHT CLIENT_FPS. Prints "WIDTH HEIGHT REFRESH"
+    # (REFRESH empty when the source cannot expose it) or returns 1 after
+    # logging TARGET_MODE_NO_COMPATIBLE_HOST_MODE.
+    #
+    # Deterministic priority: aspect-compatible candidates only, then exact
+    # resolution, then the refresh best matching the client FPS (>= FPS with a
+    # clean cadence), then the smallest pixel difference, then the higher
+    # refresh. A higher-pixel mode is never chosen over an exact/compatible one
+    # (spec §14, §16-§18).
+    local cw=$1 ch=$2 cfps=$3 tol modes best
+    tol=${STREAM_ASPECT_TOLERANCE:-5}
+    [[ "$tol" =~ ^[0-9]+$ ]] || tol=5
+    modes=$(get_host_mode_list) || modes=""
+    if [[ -z "$modes" ]]; then
+        _sl_event TARGET_MODE_NO_COMPATIBLE_HOST_MODE "no host modes for ${cw}x${ch}"
+        return 1
+    fi
+    best=$(printf '%s\n' "$modes" | awk -v cw="$cw" -v ch="$ch" -v cfps="$cfps" -v tol="$tol" '
+        function abs(x) { return x < 0 ? -x : x }
+        BEGIN {
+            ca = int(cw * 1000 / ch)
+            bestw = ""; bestexact = 0; bestscore = -1; bestpxdiff = -1; bestr = ""
+        }
+        {
+            line = $0
+            if (line !~ /^[0-9]+x[0-9]+(@[0-9]+)?$/) next
+            split(line, p, "x")
+            w = p[1] + 0
+            rest = p[2]
+            if (index(rest, "@") > 0) { split(rest, q, "@"); h = q[1] + 0; r = q[2] + 0 }
+            else { h = rest + 0; r = "" }
+            if (abs(int(w * 1000 / h) - ca) > tol * 10) next
+            exact = (w == cw && h == ch) ? 1 : 0
+            if (r == "") score = 0
+            else if (cfps <= 0) score = 1
+            else {
+                ge = (r >= cfps) ? 1 : 0
+                score = ge * 10 + ((ge && (r % cfps) == 0) ? 1 : 0)
+            }
+            pxdiff = abs(w * h - cw * ch)
+            better = 0
+            if (bestw == "") better = 1
+            else if (exact > bestexact) better = 1
+            else if (exact < bestexact) better = 0
+            else if (score > bestscore) better = 1
+            else if (score < bestscore) better = 0
+            else if (pxdiff < bestpxdiff) better = 1
+            else if (pxdiff > bestpxdiff) better = 0
+            else if (r + 0 > bestr + 0) better = 1
+            if (better) {
+                bestw = w; besth = h; bestr = r
+                bestexact = exact; bestscore = score; bestpxdiff = pxdiff
+            }
+        }
+        END { if (bestw != "") printf "%d %d %s\n", bestw, besth, bestr }
+    ')
+    if [[ -z "$best" ]]; then
+        _sl_event TARGET_MODE_NO_COMPATIBLE_HOST_MODE "${cw}x${ch}"
+        return 1
+    fi
+    printf '%s\n' "$best"
 }
 
 get_current_mode() {
@@ -308,9 +471,11 @@ get_current_mode() {
 }
 
 is_target_mode_active() {
-    local current r
+    local current r res
+    res="${TARGET_WIDTH:-$STREAM_WIDTH}x${TARGET_HEIGHT:-$STREAM_HEIGHT}"
     current=$(get_current_mode 2>/dev/null || true)
-    if [[ "$current" == "${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRESH}" ]]; then
+    [[ -n "$current" ]] || return 1
+    if [[ "$current" == "${res}@${TARGET_REFRESH:-$STREAM_REFRESH}" ]]; then
         return 0
     fi
     # With dynamic external modes enabled, gamescope re-picks the display's
@@ -318,7 +483,7 @@ is_target_mode_active() {
     # on this build: 1920x1200@60Hz -> @164Hz within ~1s). Same resolution =>
     # same stream geometry; accept the configured alternates.
     for r in ${STREAM_ALT_REFRESHES:-164}; do
-        if [[ "$current" == "${STREAM_WIDTH}x${STREAM_HEIGHT}@${r}" ]]; then
+        if [[ "$current" == "${res}@${r}" ]]; then
             return 0
         fi
     done
@@ -481,12 +646,14 @@ set_xwayland_server_mode() {
 }
 
 set_stream_xwayland_mode() {
+    # Uses the runtime target resolved from the client hint, not the static
+    # stream config (spec §21-§22): Xwayland #1 must match the output geometry.
     set_xwayland_server_mode "${STREAM_XWAYLAND_SERVER_INDEX:-1}" \
-        "$STREAM_WIDTH" "$STREAM_HEIGHT" "${STREAM_XWAYLAND_ALLOW_SUPERRES:-0}"
+        "${TARGET_WIDTH:-$STREAM_WIDTH}" "${TARGET_HEIGHT:-$STREAM_HEIGHT}" "${STREAM_XWAYLAND_ALLOW_SUPERRES:-0}"
 }
 
 verify_stream_xwayland_mode() {
-    local want="${STREAM_WIDTH}x${STREAM_HEIGHT}" got
+    local want="${TARGET_WIDTH:-$STREAM_WIDTH}x${TARGET_HEIGHT:-$STREAM_HEIGHT}" got
     got=$(get_xwayland_server_mode "${STREAM_XWAYLAND_SERVER_INDEX:-1}" 2>/dev/null || true)
     [[ "$got" == "$want" ]]
 }

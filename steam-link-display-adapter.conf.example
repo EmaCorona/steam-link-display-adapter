@@ -1,0 +1,78 @@
+# Steam Link Display Wrapper configuration
+# Copy to: ~/.config/steam-link-display-adapter/config
+
+CONNECTOR='DP-3'
+
+# Streaming target: Legion Go S (used as fallback when the client hint is not
+# available, and as the fixed target when STREAM_MODE=fixed)
+STREAM_WIDTH=1920
+STREAM_HEIGHT=1200
+STREAM_REFRESH=60
+STREAM_FPS=60
+STREAM_ASPECT='16:10'
+
+# Dynamic client resolution (spec 2026-09-29). 'auto' resolves the geometry from
+# the Steam Link client's "Maximum capture" hint; 'fixed' keeps the previous
+# constant behaviour (rollback switch).
+STREAM_MODE='auto'
+# The client capture hint is only valid if it is at most this old (seconds).
+STREAM_CAPTURE_HINT_MAX_AGE_SECONDS=10
+# Client hint valid but no aspect-compatible host mode: auto = fallback only if
+# its aspect matches the client, never = fail-closed, always = fallback anyway.
+STREAM_NO_COMPATIBLE_FALLBACK='auto'
+# Aspect-ratio compatibility tolerance for the mode resolver, percent.
+STREAM_ASPECT_TOLERANCE=5
+# Refresh alternates accepted for the target resolution: with dynamic modes
+# enabled gamescope re-picks the display's highest refresh right after the
+# switch (observed: 1920x1200@60Hz -> @164Hz).
+STREAM_ALT_REFRESHES='164'
+
+# Xwayland #1 (the game server) does not follow the DRM/output switch: it is
+# synchronized explicitly through GAMESCOPE_XWAYLAND_MODE_CONTROL and verified
+# on its root geometry before the game launches.
+STREAM_XWAYLAND_SERVER_INDEX=1
+STREAM_XWAYLAND_ALLOW_SUPERRES=0
+# Discovery of the DISPLAY <-> Gamescope server index mapping (via
+# GAMESCOPE_XWAYLAND_SERVER_ID): extra candidate displays and scan range.
+XWAYLAND_SCAN_MAX=9
+XWAYLAND_EXTRA_DISPLAYS=''
+
+# Steam host logs read for the "Maximum capture" client hint and as an
+# additional "recent stream cycle" source (the journal loses its Steam markers
+# across a Steam restart; these files do not).
+STEAM_STREAM_LOG="$HOME/.local/share/Steam/logs/streaming_log.txt"
+STEAM_STREAM_LOG_PREV="$HOME/.local/share/Steam/logs/streaming_log.previous.txt"
+
+# Steam Link detection: a recent stream cycle (within WINDOW seconds) makes the
+# wrapper wait up to WAIT seconds for the session to (re)appear — the host
+# re-establishes it ~1-2s after a launch (launch race, measured 2026-09-28).
+STREAM_DETECT_WINDOW_SECONDS=180
+STREAM_DETECT_WAIT_SECONDS=5
+
+# Local Gamescope mode
+LOCAL_WIDTH=3440
+LOCAL_HEIGHT=1440
+LOCAL_REFRESH=165
+
+# Timing
+MODE_TIMEOUT_SECONDS=5
+POLL_INTERVAL_SECONDS=0.10
+
+# X/Gamescope
+GAMESCOPE_DISPLAY="${DISPLAY:-}"
+GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
+
+# State/log locations
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
+LOG_FILE="$STATE_DIR/wrapper.log"
+STATE_FILE="$STATE_DIR/state"
+LOCK_FILE="$STATE_DIR/lock"
+MODES_FILE="$HOME/.config/gamescope/modes.cfg"
+
+# Per-game override: pass it in the Steam Launch Options instead of editing this
+# file, e.g.  steam-link-display-adapter --mode 1920x1200 %command%
+#   --mode auto       -> dynamic resolution from the client (same as STREAM_MODE=auto)
+#   --mode WxH        -> force WIDTH/HEIGHT; the resolver chooses a compatible refresh
+# (the refresh is never specified from the CLI: any "@FPS" form is invalid)
+# CLI --mode wins over STREAM_MODE. Run `steam-link-display-adapter --help` for usage.

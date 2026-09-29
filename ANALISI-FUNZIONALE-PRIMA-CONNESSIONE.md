@@ -2,7 +2,7 @@
 
 ## 1. Obiettivo
 
-Correggere il comportamento residuo di `steam-link-virtual-display` affinché la prima connessione Steam Link venga gestita esattamente come le connessioni successive.
+Correggere il comportamento residuo di `steam-link-display-adapter` affinché la prima connessione Steam Link venga gestita esattamente come le connessioni successive.
 
 Il comportamento attuale è:
 

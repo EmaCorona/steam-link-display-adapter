@@ -1,12 +1,12 @@
-# ANALISI FUNZIONALE + IMPLEMENTAZIONE PARZIALE — steam-link-virtual-display
-## steam-link-virtual-display — Steam Launch Wrapper per Virtual Display 1920×1200 @ 60 FPS
+# ANALISI FUNZIONALE + IMPLEMENTAZIONE PARZIALE — steam-link-display-adapter
+## steam-link-display-adapter — Steam Launch Wrapper per Virtual Display 1920×1200 @ 60 FPS
 ### Bazzite Gaming Mode + Gamescope + Steam Link
 
 > **Stato del documento:** base operativa per l'implementazione.
 >
 > **Obiettivo:** fornire un wrapper per-game richiamabile con `%command%`, mantenendo il monitor host ultrawide per l'uso locale e predisponendo, durante il gioco avviato con il wrapper, un output di streaming **1920×1200, 16:10, 60 Hz e target 60 FPS**.
 >
-> **Handoff:** la parte environment-specific di Gamescope è volutamente isolata in `steamlink-display-hook.sh`. L'altro agent deve completare e validare esclusivamente i punti indicati nella sezione **Handoff per l'altro agent**.
+> **Handoff:** la parte environment-specific di Gamescope è volutamente isolata in `steam-link-display-adapter-hook.sh`. L'altro agent deve completare e validare esclusivamente i punti indicati nella sezione **Handoff per l'altro agent**.
 
 ---
 
@@ -17,7 +17,7 @@ Realizzare in **Bazzite Game Mode** uno script Bash utilizzabile come wrapper de
 Launch Option prevista:
 
 ```text
-~/.local/bin/steam-link-virtual-display %command%
+~/.local/bin/steam-link-display-adapter %command%
 ```
 
 Il comportamento desiderato è:
@@ -189,7 +189,7 @@ Il `VirtualConnector` interno di Gamescope non deve essere considerato automatic
 │ Steam                                                        │
 │  │                                                         │
 │  ▼                                                         │
-│ steam-link-virtual-display %command%                        │
+│ steam-link-display-adapter %command%                        │
 │  │                                                         │
 │  ├── PRECHECK                                              │
 │  ├── LOCK                                                  │
@@ -223,11 +223,11 @@ Il `VirtualConnector` interno di Gamescope non deve essere considerato automatic
 La prima implementazione contiene i seguenti componenti.
 
 ```text
-steamlink-display-wrapper.sh
-steamlink-display-hook.sh
-steamlink-display-verify-environment.sh
-steamlink-display-restore.sh
-steamlink-display.conf.example
+steam-link-display-adapter.sh
+steam-link-display-adapter-hook.sh
+steam-link-display-adapter-verify-environment.sh
+steam-link-display-adapter-restore.sh
+steam-link-display-adapter.conf.example
 install.sh
 ```
 
@@ -235,15 +235,15 @@ La struttura installata sarà:
 
 ```text
 ~/.local/bin/
-├── steamlink-display-wrapper
-├── steamlink-display-hook.sh
-├── steamlink-display-verify-environment
-└── steamlink-display-restore
+├── steam-link-display-adapter
+├── steam-link-display-adapter-hook.sh
+├── steam-link-display-adapter-verify-environment
+└── steam-link-display-adapter-restore
 
-~/.config/steamlink-display/
+~/.config/steam-link-display-adapter/
 └── config
 
-~/.local/state/steamlink-display/
+~/.local/state/steam-link-display-adapter/
 ├── lock
 ├── state
 ├── modes.cfg.backup
@@ -256,7 +256,7 @@ La struttura installata sarà:
 
 ## Funzione
 
-`steamlink-display-wrapper.sh` è il componente che deve essere inserito nelle Launch Options di Steam.
+`steam-link-display-adapter.sh` è il componente che deve essere inserito nelle Launch Options di Steam.
 
 Responsabilità:
 
@@ -282,7 +282,7 @@ precheck
 # Steam launch wrapper for Bazzite Game Mode / Gamescope.
 # Target: 1920x1200 @ 60 Hz, 16:10, 60 FPS streaming.
 # HANDOFF: environment-specific completion point is intentionally isolated in
-# steamlink-display-hook.sh. Validate it on the real Bazzite Game Mode session
+# steam-link-display-adapter-hook.sh. Validate it on the real Bazzite Game Mode session
 # before relying on this wrapper. In particular verify xprop/xdpyinfo display
 # access and the exact Gamescope connector/mode behavior.
 #
@@ -290,13 +290,13 @@ precheck
 # - This wrapper is intentionally fail-closed.
 # - It NEVER turns the physical display off unless the target Gamescope mode
 #   was verified first.
-# - The actual Gamescope integration lives in steamlink-display-hook.sh.
+# - The actual Gamescope integration lives in steam-link-display-adapter-hook.sh.
 
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-HOOK="$SCRIPT_DIR/steamlink-display-hook.sh"
-USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display/config"
+HOOK="$SCRIPT_DIR/steam-link-display-adapter-hook.sh"
+USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter/config"
 
 CONNECTOR='DP-3'
 STREAM_WIDTH=1920
@@ -311,8 +311,8 @@ MODE_TIMEOUT_SECONDS=5
 POLL_INTERVAL_SECONDS=0.10
 GAMESCOPE_DISPLAY="${DISPLAY:-}"
 GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steamlink-display"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
 LOG_FILE="$STATE_DIR/wrapper.log"
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/lock"
@@ -335,7 +335,7 @@ fi
 
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
-    printf 'steamlink-display-wrapper: another instance is already active\n' >&2
+    printf 'steam-link-display-adapter: another instance is already active\n' >&2
     exit 73
 fi
 
@@ -349,7 +349,7 @@ log() {
 
 fail() {
     log "ERROR: $*"
-    printf 'steamlink-display-wrapper: ERROR: %s\n' "$*" >&2
+    printf 'steam-link-display-adapter: ERROR: %s\n' "$*" >&2
     return 1
 }
 
@@ -654,7 +654,7 @@ exit "$GAME_EXIT_CODE"
 
 ## Funzione
 
-`steamlink-display-hook.sh` contiene esclusivamente la parte dipendente dall'ambiente Gamescope/DRM.
+`steam-link-display-adapter-hook.sh` contiene esclusivamente la parte dipendente dall'ambiente Gamescope/DRM.
 
 Questa separazione è intenzionale: l'altro agent può correggere o sostituire il metodo di interrogazione/cambio mode senza riscrivere il lifecycle del wrapper.
 
@@ -832,7 +832,7 @@ wait_for_local_mode() {
 
 ## Funzione
 
-`steamlink-display-verify-environment.sh` è volutamente **read-only**.
+`steam-link-display-adapter-verify-environment.sh` è volutamente **read-only**.
 
 Serve all'altro agent per raccogliere:
 
@@ -921,7 +921,7 @@ printf '\n=== END ===\n'
 
 ## Funzione
 
-`steamlink-display-restore.sh` è un helper conservativo per recuperare uno stato rimasto da una precedente esecuzione.
+`steam-link-display-adapter-restore.sh` è un helper conservativo per recuperare uno stato rimasto da una precedente esecuzione.
 
 Principio:
 
@@ -951,13 +951,13 @@ clear state
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display/config"
-HOOK="$SCRIPT_DIR/steamlink-display-hook.sh"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter/config"
+HOOK="$SCRIPT_DIR/steam-link-display-adapter-hook.sh"
 
 LOCAL_WIDTH=3440
 LOCAL_HEIGHT=1440
 LOCAL_REFRESH=165
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steamlink-display"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
 STATE_FILE="$STATE_DIR/state"
 GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
 GAMESCOPE_DISPLAY="${DISPLAY:-}"
@@ -1017,14 +1017,14 @@ printf '[%s] restore: finished\n' "$(date '+%Y-%m-%d %H:%M:%S')"
 Il file di configurazione è:
 
 ```text
-~/.config/steamlink-display/config
+~/.config/steam-link-display-adapter/config
 ```
 
 Template:
 
 ```bash
 # Steam Link Display Wrapper configuration
-# Copy to: ~/.config/steamlink-display/config
+# Copy to: ~/.config/steam-link-display-adapter/config
 
 CONNECTOR='DP-3'
 
@@ -1049,8 +1049,8 @@ GAMESCOPE_DISPLAY="${DISPLAY:-}"
 GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
 
 # State/log locations
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steamlink-display"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
 LOG_FILE="$STATE_DIR/wrapper.log"
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/lock"
@@ -1086,23 +1086,23 @@ set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 BIN_DIR="${HOME}/.local/bin"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR"
 
-install -m 0755 "$SCRIPT_DIR/steamlink-display-wrapper.sh" "$BIN_DIR/steam-link-virtual-display"
-install -m 0755 "$SCRIPT_DIR/steamlink-display-hook.sh" "$BIN_DIR/steamlink-display-hook.sh"
-install -m 0755 "$SCRIPT_DIR/steamlink-display-verify-environment.sh" "$BIN_DIR/steamlink-display-verify-environment"
-install -m 0755 "$SCRIPT_DIR/steamlink-display-restore.sh" "$BIN_DIR/steamlink-display-restore"
+install -m 0755 "$SCRIPT_DIR/steam-link-display-adapter.sh" "$BIN_DIR/steam-link-display-adapter"
+install -m 0755 "$SCRIPT_DIR/steam-link-display-adapter-hook.sh" "$BIN_DIR/steam-link-display-adapter-hook.sh"
+install -m 0755 "$SCRIPT_DIR/steam-link-display-adapter-verify-environment.sh" "$BIN_DIR/steam-link-display-adapter-verify-environment"
+install -m 0755 "$SCRIPT_DIR/steam-link-display-adapter-restore.sh" "$BIN_DIR/steam-link-display-adapter-restore"
 
 if [[ ! -e "$CONFIG_DIR/config" ]]; then
-    install -m 0644 "$SCRIPT_DIR/steamlink-display.conf.example" "$CONFIG_DIR/config"
+    install -m 0644 "$SCRIPT_DIR/steam-link-display-adapter.conf.example" "$CONFIG_DIR/config"
     echo "Installed new config: $CONFIG_DIR/config"
 else
     echo "Existing config preserved: $CONFIG_DIR/config"
 fi
 
-printf '\nLaunch option:\n%s\n' "$BIN_DIR/steam-link-virtual-display %command%"
+printf '\nLaunch option:\n%s\n' "$BIN_DIR/steam-link-display-adapter %command%"
 printf '\nInstalled files in: %s\n' "$BIN_DIR"
 ```
 
@@ -1122,13 +1122,13 @@ L'installer non richiede `sudo`.
 Dopo l'installazione, nelle Launch Options del gioco Steam inserire:
 
 ```text
-/home/USER/.local/bin/steam-link-virtual-display %command%
+/home/USER/.local/bin/steam-link-display-adapter %command%
 ```
 
 La configurazione deve essere controllata prima del primo test:
 
 ```bash
-nano ~/.config/steamlink-display/config
+nano ~/.config/steam-link-display-adapter/config
 ```
 
 ---
@@ -1197,7 +1197,7 @@ NO PARTIAL STATE
 Il wrapper usa:
 
 ```text
-~/.local/state/steamlink-display/lock
+~/.local/state/steam-link-display-adapter/lock
 ```
 
 con `flock`.
@@ -1221,7 +1221,7 @@ state file
 Lo stato persistente utilizza:
 
 ```text
-~/.local/state/steamlink-display/state
+~/.local/state/steam-link-display-adapter/state
 ```
 
 L'obiettivo è poter riconoscere uno stato precedente rimasto incompleto.
@@ -1243,7 +1243,7 @@ modifica temporanea
 Il backup viene salvato in:
 
 ```text
-~/.local/state/steamlink-display/modes.cfg.backup
+~/.local/state/steam-link-display-adapter/modes.cfg.backup
 ```
 
 Il file originale viene ripristinato a fine gioco.
@@ -1838,7 +1838,7 @@ Il lavoro da completare deve concentrarsi principalmente su:
 Eseguire:
 
 ```bash
-~/.local/bin/steamlink-display-verify-environment
+~/.local/bin/steam-link-display-adapter-verify-environment
 ```
 
 Raccogliere e verificare:
@@ -2063,30 +2063,30 @@ La prima versione è completata quando:
 Il pacchetto iniziale contiene:
 
 ```text
-steamlink-display-wrapper/steamlink-display-wrapper.sh
-steamlink-display-wrapper/steamlink-display-hook.sh
-steamlink-display-wrapper/steamlink-display-verify-environment.sh
-steamlink-display-wrapper/steamlink-display-restore.sh
-steamlink-display-wrapper/steamlink-display.conf.example
-steamlink-display-wrapper/install.sh
+steam-link-display-adapter/steam-link-display-adapter.sh
+steam-link-display-adapter/steam-link-display-adapter-hook.sh
+steam-link-display-adapter/steam-link-display-adapter-verify-environment.sh
+steam-link-display-adapter/steam-link-display-adapter-restore.sh
+steam-link-display-adapter/steam-link-display-adapter.conf.example
+steam-link-display-adapter/install.sh
 ```
 
 ## Launch Option
 
 ```text
-/home/USER/.local/bin/steam-link-virtual-display %command%
+/home/USER/.local/bin/steam-link-display-adapter %command%
 ```
 
 ## Diagnostica
 
 ```bash
-~/.local/bin/steamlink-display-verify-environment
+~/.local/bin/steam-link-display-adapter-verify-environment
 ```
 
 ## Recovery manuale
 
 ```bash
-~/.local/bin/steamlink-display-restore
+~/.local/bin/steam-link-display-adapter-restore
 ```
 
 ---
@@ -2121,7 +2121,7 @@ Rimane da completare/verificare sulla Bazzite reale:
 → actual screen sleep effect
 ```
 
-Questi punti sono deliberatamente isolati in `steamlink-display-hook.sh`.
+Questi punti sono deliberatamente isolati in `steam-link-display-adapter-hook.sh`.
 
 ---
 

@@ -4,13 +4,13 @@
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display/config"
-HOOK="$SCRIPT_DIR/steamlink-display-hook.sh"
+CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter/config"
+HOOK="$SCRIPT_DIR/steam-link-display-adapter-hook.sh"
 
 LOCAL_WIDTH=3440
 LOCAL_HEIGHT=1440
 LOCAL_REFRESH=165
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steamlink-display"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
 STATE_FILE="$STATE_DIR/state"
 GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
 GAMESCOPE_DISPLAY="${DISPLAY:-}"

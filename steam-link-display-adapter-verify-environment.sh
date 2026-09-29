@@ -4,7 +4,10 @@
 set -Eeuo pipefail
 
 CONNECTOR=${CONNECTOR:-DP-3}
-STREAM_MODE=${STREAM_MODE:-1920x1200@60}
+STREAM_MODE=${STREAM_MODE:-auto}
+STREAM_WIDTH=${STREAM_WIDTH:-1920}
+STREAM_HEIGHT=${STREAM_HEIGHT:-1200}
+STREAM_REFRESH=${STREAM_REFRESH:-60}
 GAMESCOPE_WAYLAND_DISPLAY=${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}
 
 printf '%s\n' '=== Steam Link Display Environment ==='
@@ -13,7 +16,9 @@ printf 'USER: %s\n' "${USER:-unknown}"
 printf 'DISPLAY: %s\n' "${DISPLAY:-<unset>}"
 printf 'GAMESCOPE_WAYLAND_DISPLAY: %s\n' "$GAMESCOPE_WAYLAND_DISPLAY"
 printf 'Connector requested: %s\n' "$CONNECTOR"
-printf 'Target mode: %s\n' "$STREAM_MODE"
+printf 'Stream mode: %s\n' "$STREAM_MODE"
+printf 'Fallback/fixed mode: %sx%s@%s\n' "$STREAM_WIDTH" "$STREAM_HEIGHT" "$STREAM_REFRESH"
+printf 'Steam host log: %s\n' "${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}"
 printf '\n--- Commands ---\n'
 for c in gamescopectl xprop xdpyinfo drm_info; do
     if command -v "$c" >/dev/null 2>&1; then
@@ -22,6 +27,13 @@ for c in gamescopectl xprop xdpyinfo drm_info; do
         printf '%-15s MISSING\n' "$c"
     fi
 done
+
+printf '\n--- Steam client capture hint ---\n'
+if [[ -f "${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}" ]]; then
+    grep -a 'Maximum capture:' "${STEAM_STREAM_LOG:-$HOME/.local/share/Steam/logs/streaming_log.txt}" 2>/dev/null | tail -n 3 || true
+else
+    printf '%s\n' 'Steam host log not found.'
+fi
 
 printf '\n--- Gamescope info ---\n'
 gamescopectl 2>&1 || true

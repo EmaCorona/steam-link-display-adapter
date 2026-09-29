@@ -1,8 +1,8 @@
-# Analisi funzionale — Sincronizzazione Xwayland #1 per Steam Link Virtual Display
+# Analisi funzionale — Sincronizzazione Xwayland #1 per Steam Link Display Adapter
 
 ## 1. Obiettivo
 
-Correggere il meccanismo `steam-link-virtual-display` su Bazzite Game Mode affinché una sessione Steam Link verso Legion Go S utilizzi una geometria coerente durante tutta la fase di avvio del gioco.
+Correggere il meccanismo `steam-link-display-adapter` su Bazzite Game Mode affinché una sessione Steam Link verso Legion Go S utilizzi una geometria coerente durante tutta la fase di avvio del gioco.
 
 Configurazione target:
 
@@ -180,7 +180,7 @@ Il report Valve specifica inoltre che la corrispondenza della risoluzione host/c
 
 ## 5.1 Principio
 
-Non deve essere modificata la logica generale di `steam-link-virtual-display`.
+Non deve essere modificata la logica generale di `steam-link-display-adapter`.
 
 Deve essere aggiunto un passaggio esplicito:
 

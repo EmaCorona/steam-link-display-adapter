@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 # Steam launch wrapper for Bazzite Game Mode / Gamescope.
-# Target: 1920x1200 @ 60 Hz, 16:10, 60 FPS streaming.
+# Default target: 1920x1200 @ 60 Hz, 16:10, 60 FPS streaming (fallback); the
+# stream geometry is resolved dynamically from the Steam Link client hint when
+# STREAM_MODE=auto.
 # HANDOFF: environment-specific completion point is intentionally isolated in
-# steamlink-display-hook.sh. Handoff adaptations were applied there on 2026-09-28
+# steam-link-display-adapter-hook.sh. Handoff adaptations were applied there on 2026-09-28
 # (gamescopectl backend_set_dirty re-poll, journal mode readback); the remaining
 # in-session validation in Game Mode is tracked in the package README.
 # 2026-09-28 (spec utente): the display pipeline runs only when
@@ -19,18 +21,27 @@
 # session marker, so the first connection follows the same path as the others.
 # The wrapper remains the final guard: it verifies output AND Xwayland #1 before
 # GAME_LAUNCH and never trusts an inherited "prepared" claim.
+# 2026-09-29 (spec "Risoluzione dinamica"): the geometry is no longer constant.
+# After detection the wrapper reads the client capture hint from Steam's host
+# log ("Maximum capture: WxH FPS", strictly recent), resolves it against the
+# host's advertised modes and drives OUTPUT and Xwayland #1 from the resulting
+# runtime TARGET_*; the configured STREAM_* geometry stays as fallback and
+# STREAM_MODE=fixed restores the previous behaviour.
+# 2026-09-29 (spec "Launch Options --mode"): a per-game target override can be
+# given in the Steam Launch Options (--mode auto|WxH). CLI > global
+# config > auto; an unavailable fixed mode fails closed before any change.
 #
 # IMPORTANT:
 # - This wrapper is intentionally fail-closed.
 # - It NEVER turns the physical display off unless the target Gamescope mode
 #   was verified first.
-# - The actual Gamescope integration lives in steamlink-display-hook.sh.
+# - The actual Gamescope integration lives in steam-link-display-adapter-hook.sh.
 
 set -Eeuo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-HOOK="$SCRIPT_DIR/steamlink-display-hook.sh"
-USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display/config"
+HOOK="$SCRIPT_DIR/steam-link-display-adapter-hook.sh"
+USER_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter/config"
 
 CONNECTOR='DP-3'
 STREAM_WIDTH=1920
@@ -39,6 +50,19 @@ STREAM_REFRESH=60
 STREAM_FPS=60
 STREAM_ASPECT='16:10'
 STREAM_ALT_REFRESHES='164'
+# Dynamic client resolution (spec: risoluzione Gamescope dinamica). 'auto' turns
+# the client's "Maximum capture" hint into the runtime target; 'fixed' keeps the
+# previous behaviour (STREAM_WIDTH/HEIGHT/REFRESH) and is the rollback switch.
+STREAM_MODE='auto'
+# The client capture hint is valid only if it is at most this many seconds old
+# (it must belong to the session just detected, never a previous client).
+STREAM_CAPTURE_HINT_MAX_AGE_SECONDS=10
+# Valid hint but no aspect-compatible host mode (spec §18): auto = use the
+# configured fallback only if its aspect matches the client; never = fail
+# closed; always = use the configured fallback regardless.
+STREAM_NO_COMPATIBLE_FALLBACK='auto'
+# Aspect-ratio compatibility tolerance for the mode resolver, in percent.
+STREAM_ASPECT_TOLERANCE=5
 STREAM_DETECT_WINDOW_SECONDS=180
 STREAM_DETECT_WAIT_SECONDS=5
 # Steam host logs used as an additional "recent stream cycle" source (the
@@ -58,8 +82,8 @@ MODE_TIMEOUT_SECONDS=5
 POLL_INTERVAL_SECONDS=0.10
 GAMESCOPE_DISPLAY="${DISPLAY:-}"
 GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}"
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steamlink-display"
-CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steamlink-display"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/steam-link-display-adapter"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/steam-link-display-adapter"
 LOG_FILE="$STATE_DIR/wrapper.log"
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/lock"
@@ -74,11 +98,6 @@ mkdir -p "$STATE_DIR" "$CONFIG_DIR"
 
 # shellcheck disable=SC1091
 source "$HOOK"
-
-if [[ $# -eq 0 ]]; then
-    printf 'Usage: %s <game-command> [args...]\n' "$0" >&2
-    exit 64
-fi
 
 log_file() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$LOG_FILE"
@@ -104,7 +123,7 @@ log_event() {
 
 fail() {
     log "ERROR: $*"
-    printf 'steamlink-display-wrapper: ERROR: %s\n' "$*" >&2
+    printf 'steam-link-display-adapter: ERROR: %s\n' "$*" >&2
     return 1
 }
 
@@ -112,6 +131,87 @@ lock_acquire() {
     exec 9>"$LOCK_FILE"
     flock -n 9
 }
+
+# --- Wrapper CLI (Steam Launch Options) --------------------------------------
+#
+# steam-link-display-adapter [OPTIONS] %command%
+#
+# Only the wrapper options BEFORE the game command are consumed; the game
+# command (and anything after it) is forwarded verbatim. Supported:
+#   --mode auto | WxH            (per-game target override)
+#   --help
+# A missing/duplicate/unknown option or an invalid --mode value aborts before
+# any display or state change.
+MODE_SOURCE=''
+MODE_SPEC=''
+CLI_WIDTH=''
+CLI_HEIGHT=''
+GAME_ARGS=()
+
+usage() {
+    cat >&2 <<'EOF'
+Usage:
+  steam-link-display-adapter [OPTIONS] %command%
+
+Options:
+  --mode auto        Use dynamic resolution based on the Steam Link client.
+  --mode WxH         Force the resolution and choose a compatible refresh automatically.
+  --help             Show this help.
+
+Examples:
+  steam-link-display-adapter --mode auto %command%
+  steam-link-display-adapter --mode 1920x1200 %command%
+EOF
+}
+
+parse_mode_value() {
+    # Validate a --mode value and fill the CLI request fields.
+    local v=$1
+    if [[ "$v" == auto ]]; then
+        MODE_SOURCE=auto; MODE_SPEC=auto
+        CLI_WIDTH=''; CLI_HEIGHT=''
+        return 0
+    fi
+    # Only "WxH": the refresh is never set from the CLI (it is a resolver
+    # concern), so any "@FPS" form is invalid (spec 2026-09-29).
+    if [[ "$v" =~ ^([1-9][0-9]*)x([1-9][0-9]*)$ ]]; then
+        MODE_SOURCE=cli; MODE_SPEC=$v
+        CLI_WIDTH=${BASH_REMATCH[1]}; CLI_HEIGHT=${BASH_REMATCH[2]}
+        return 0
+    fi
+    return 1
+}
+
+parse_wrapper_args() {
+    local mode_seen=0
+    while (( $# > 0 )); do
+        case "$1" in
+            --help)
+                usage; exit 0 ;;
+            --mode)
+                (( mode_seen )) && { fail "duplicate --mode option"; exit 64; }
+                [[ $# -ge 2 ]] || { fail "--mode requires a value"; exit 64; }
+                parse_mode_value "$2" || { fail "invalid --mode value: $2"; exit 64; }
+                mode_seen=1
+                shift 2 ;;
+            --mode=*)
+                (( mode_seen )) && { fail "duplicate --mode option"; exit 64; }
+                parse_mode_value "${1#--mode=}" || { fail "invalid --mode value: ${1#--mode=}"; exit 64; }
+                mode_seen=1
+                shift ;;
+            --)
+                shift; break ;;
+            -*)
+                fail "unknown wrapper option: $1"; exit 64 ;;
+            *)
+                break ;;
+        esac
+    done
+    GAME_ARGS=("$@")
+    [[ ${#GAME_ARGS[@]} -gt 0 ]] || { usage; exit 64; }
+}
+
+parse_wrapper_args "$@"
 
 state_write() {
     local phase=$1
@@ -124,6 +224,16 @@ state_write() {
         printf 'MODES_EXISTED=%s\n' "$MODES_EXISTED"
         printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$SCREEN_SLEEP_REQUESTED"
         printf 'XWAYLAND_SYNCED=%s\n' "$XWAYLAND_SYNCED"
+        printf 'STREAM_MODE=%s\n' "${STREAM_MODE:-auto}"
+        printf 'CLIENT_WIDTH=%s\n' "${CLIENT_WIDTH:-}"
+        printf 'CLIENT_HEIGHT=%s\n' "${CLIENT_HEIGHT:-}"
+        printf 'CLIENT_FPS=%s\n' "${CLIENT_FPS:-}"
+        printf 'TARGET_WIDTH=%s\n' "${TARGET_WIDTH:-}"
+        printf 'TARGET_HEIGHT=%s\n' "${TARGET_HEIGHT:-}"
+        printf 'TARGET_REFRESH=%s\n' "${TARGET_REFRESH:-}"
+        printf 'TARGET_FPS=%s\n' "${TARGET_FPS:-}"
+        printf 'TARGET_SOURCE=%s\n' "${TARGET_SOURCE:-}"
+        printf 'TARGET_MODE_SPEC=%s\n' "${TARGET_MODE_SPEC:-}"
     } >"$tmp"
     mv -f -- "$tmp" "$STATE_FILE"
 }
@@ -146,6 +256,17 @@ GAME_EXIT_CODE=0
 BACKUP_TAKEN=0
 STALE_STATE_LOADED=0
 XWAYLAND_SYNCED=0
+# Runtime target resolved from the client hint (spec §10: the configured
+# STREAM_* values are never overwritten; they remain the fallback).
+CLIENT_WIDTH=''
+CLIENT_HEIGHT=''
+CLIENT_FPS=''
+TARGET_WIDTH=''
+TARGET_HEIGHT=''
+TARGET_REFRESH=''
+TARGET_FPS=''
+TARGET_SOURCE=''
+TARGET_MODE_SPEC=''
 
 backup_modes_file() {
     rm -f -- "$MODES_BACKUP"
@@ -289,6 +410,10 @@ cleanup() {
 
     rm -f -- "$MODES_BACKUP" 2>/dev/null || true
     state_clear
+    # The client hint is valid for the current session only (spec §28): drop it
+    # so the next stream recomputes its own target from scratch.
+    CLIENT_WIDTH=''; CLIENT_HEIGHT=''; CLIENT_FPS=''
+    TARGET_WIDTH=''; TARGET_HEIGHT=''; TARGET_REFRESH=''; TARGET_FPS=''; TARGET_SOURCE=''; TARGET_MODE_SPEC=''
     log "Cleanup finished"
 
     return "$rc"
@@ -356,14 +481,134 @@ recover_stale_state() {
 }
 
 validate_config() {
-    [[ "$STREAM_WIDTH" -eq 1920 && "$STREAM_HEIGHT" -eq 1200 ]] || fail "stream resolution must be 1920x1200"
-    [[ "$STREAM_REFRESH" -eq 60 ]] || fail "stream refresh must be 60 Hz"
-    [[ "$STREAM_FPS" -eq 60 ]] || fail "stream FPS target must be 60"
-    [[ "$STREAM_ASPECT" == '16:10' ]] || fail "stream aspect must be 16:10"
+    [[ "${STREAM_MODE:-auto}" == auto || "${STREAM_MODE:-auto}" == fixed ]] || fail "STREAM_MODE must be 'auto' or 'fixed'"
+    [[ "$STREAM_WIDTH" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_WIDTH invalid"
+    [[ "$STREAM_HEIGHT" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_HEIGHT invalid"
+    [[ "$STREAM_REFRESH" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_REFRESH invalid"
+    [[ "$STREAM_FPS" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_FPS invalid"
+    [[ "$STREAM_ASPECT" =~ ^[0-9]+:[0-9]+$ ]] || fail "STREAM_ASPECT must be W:H"
+    local asp_w asp_h
+    asp_w=${STREAM_ASPECT%%:*}; asp_h=${STREAM_ASPECT##*:}
+    (( STREAM_WIDTH * asp_h == STREAM_HEIGHT * asp_w )) || fail "STREAM_ASPECT must match STREAM_WIDTH:STREAM_HEIGHT"
+    [[ "${STREAM_CAPTURE_HINT_MAX_AGE_SECONDS:-10}" =~ ^[0-9]+$ ]] || fail "STREAM_CAPTURE_HINT_MAX_AGE_SECONDS invalid"
+    [[ "${STREAM_NO_COMPATIBLE_FALLBACK:-auto}" =~ ^(auto|never|always)$ ]] || fail "STREAM_NO_COMPATIBLE_FALLBACK must be auto|never|always"
+    [[ "${STREAM_ASPECT_TOLERANCE:-5}" =~ ^[0-9]+$ ]] || fail "STREAM_ASPECT_TOLERANCE invalid"
     [[ -n "$CONNECTOR" ]] || fail "CONNECTOR is empty"
     [[ "$MODE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "MODE_TIMEOUT_SECONDS invalid"
     [[ "$STREAM_XWAYLAND_SERVER_INDEX" =~ ^[0-9]+$ ]] || fail "STREAM_XWAYLAND_SERVER_INDEX invalid"
     [[ "$STREAM_XWAYLAND_ALLOW_SUPERRES" =~ ^[01]$ ]] || fail "STREAM_XWAYLAND_ALLOW_SUPERRES must be 0 or 1"
+}
+
+resolve_cli_target() {
+    # --mode WxH: the CLI fixes only the geometry; the shared resolver picks a
+    # compatible refresh. Never uses the configured STREAM_* geometry, and a
+    # requested resolution that is unavailable fails closed without
+    # substitution.
+    TARGET_SOURCE=cli
+    TARGET_MODE_SPEC=$MODE_SPEC
+    local resolved rw rh rr
+    TARGET_WIDTH=$CLI_WIDTH
+    TARGET_HEIGHT=$CLI_HEIGHT
+    if ! resolved=$(resolve_target_mode "$CLI_WIDTH" "$CLI_HEIGHT" 0); then
+        log_event TARGET_MODE_UNAVAILABLE "${CLI_WIDTH}x${CLI_HEIGHT}"
+        fail "requested resolution ${CLI_WIDTH}x${CLI_HEIGHT} is not available (fail-closed)"
+        return 1
+    fi
+    read -r rw rh rr <<<"$resolved" || true
+    if [[ "$rw" != "$CLI_WIDTH" || "$rh" != "$CLI_HEIGHT" ]]; then
+        # The resolver may return a merely aspect-compatible mode; a CLI
+        # resolution is a hard constraint, so this is an unavailable mode.
+        log_event TARGET_MODE_UNAVAILABLE "${CLI_WIDTH}x${CLI_HEIGHT}"
+        fail "requested resolution ${CLI_WIDTH}x${CLI_HEIGHT} is not available (fail-closed)"
+        return 1
+    fi
+    TARGET_REFRESH=${rr:-$STREAM_REFRESH}
+    TARGET_FPS=$STREAM_FPS
+    log_event CLI_TARGET_MODE "${TARGET_WIDTH}x${TARGET_HEIGHT}"
+}
+
+resolve_stream_target() {
+    # Turn the mode source into the runtime target (spec §3, §8-§10, §16, §30).
+    # Priority: CLI --mode > global config > auto. Sets CLIENT_*/TARGET_* and
+    # logs the source. The configured STREAM_* geometry is only ever the
+    # fallback (or the fixed target); it is never overwritten.
+    local hint resolved policy
+    CLIENT_WIDTH=''; CLIENT_HEIGHT=''; CLIENT_FPS=''
+    TARGET_WIDTH=''; TARGET_HEIGHT=''; TARGET_REFRESH=''; TARGET_FPS=''; TARGET_SOURCE=''
+    TARGET_MODE_SPEC=''
+
+    # CLI override from the Steam Launch Options wins over the global config.
+    if [[ "${MODE_SOURCE:-}" == cli ]]; then
+        resolve_cli_target || return 1
+        log "MODE_SOURCE=cli"
+        log "CLI_MODE=${MODE_SPEC:-}"
+        log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+        log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=cli"
+        return 0
+    fi
+
+    if [[ "${MODE_SOURCE:-}" == auto ]]; then
+        log "MODE_SOURCE=auto"
+    elif [[ "${STREAM_MODE:-auto}" == fixed ]]; then
+        # Global config fixed (no CLI): equivalent to the previous behaviour and
+        # the rollback path; the client hint is not read at all (spec §30).
+        TARGET_WIDTH=$STREAM_WIDTH
+        TARGET_HEIGHT=$STREAM_HEIGHT
+        TARGET_REFRESH=$STREAM_REFRESH
+        TARGET_FPS=$STREAM_FPS
+        TARGET_SOURCE=fixed
+        TARGET_MODE_SPEC="${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRESH}"
+        log "MODE_SOURCE=config"
+        log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+        log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fixed"
+        return 0
+    fi
+
+    # Dynamic path (no CLI, or explicit --mode auto).
+    if hint=$(get_latest_stream_capture_hint); then
+        read -r CLIENT_WIDTH CLIENT_HEIGHT CLIENT_FPS <<<"$hint" || true
+        if resolved=$(resolve_target_mode "$CLIENT_WIDTH" "$CLIENT_HEIGHT" "$CLIENT_FPS"); then
+            read -r TARGET_WIDTH TARGET_HEIGHT TARGET_REFRESH <<<"$resolved" || true
+            [[ -n "$TARGET_REFRESH" ]] || TARGET_REFRESH=$STREAM_REFRESH
+            TARGET_FPS=$CLIENT_FPS
+            TARGET_SOURCE=steam_capture_hint
+            TARGET_MODE_SPEC=auto
+            log "Client hint ${CLIENT_WIDTH}x${CLIENT_HEIGHT}@${CLIENT_FPS} -> target ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+            [[ "${MODE_SOURCE:-}" != auto ]] && log "MODE_SOURCE=auto"
+            log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+            log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=steam_capture_hint"
+            return 0
+        fi
+        # Valid hint but no aspect-compatible host mode (spec §18).
+        policy=${STREAM_NO_COMPATIBLE_FALLBACK:-auto}
+        if [[ "$policy" == always ]] || { [[ "$policy" == auto ]] && sl_aspect_compatible "$CLIENT_WIDTH" "$CLIENT_HEIGHT" "$STREAM_WIDTH" "$STREAM_HEIGHT"; }; then
+            TARGET_WIDTH=$STREAM_WIDTH
+            TARGET_HEIGHT=$STREAM_HEIGHT
+            TARGET_REFRESH=$STREAM_REFRESH
+            TARGET_FPS=$CLIENT_FPS
+            TARGET_SOURCE=fallback
+            TARGET_MODE_SPEC=fallback
+            log "No aspect-compatible host mode for client ${CLIENT_WIDTH}x${CLIENT_HEIGHT}; using configured fallback"
+            log "MODE_SOURCE=fallback"
+            log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+            log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fallback"
+            return 0
+        fi
+        fail "no host mode compatible with client ${CLIENT_WIDTH}x${CLIENT_HEIGHT} (fail-closed)"
+        return 1
+    fi
+
+    # Hint unavailable or stale: configured fallback (spec §8, §28).
+    TARGET_WIDTH=$STREAM_WIDTH
+    TARGET_HEIGHT=$STREAM_HEIGHT
+    TARGET_REFRESH=$STREAM_REFRESH
+    TARGET_FPS=$STREAM_FPS
+    TARGET_SOURCE=fallback
+    TARGET_MODE_SPEC=fallback
+    log "MODE_SOURCE=fallback"
+    log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+    log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fallback"
+    return 0
 }
 
 precheck() {
@@ -388,8 +633,8 @@ precheck() {
 
     log "Gamescope connector verified: $actual_connector"
 
-    mode_list_contains "${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRESH}" || {
-        fail "Gamescope does not currently advertise ${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRESH}"
+    mode_list_contains "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}" || {
+        fail "Gamescope does not currently advertise ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
         return 1
     }
 
@@ -422,7 +667,7 @@ prepare_stream_mode() {
 
     backup_modes_file
     state_write 'PREPARING'
-    write_saved_mode_for_description "$description" "$STREAM_WIDTH" "$STREAM_HEIGHT" "$STREAM_REFRESH"
+    write_saved_mode_for_description "$description" "$TARGET_WIDTH" "$TARGET_HEIGHT" "$TARGET_REFRESH"
 
     set_dynamic_modes_allowed 1
     log "Dynamic external display modes enabled"
@@ -439,20 +684,20 @@ prepare_stream_mode() {
         return 1
     fi
 
-    current=$(get_current_mode 2>/dev/null || printf '%sx%s@%s' "$STREAM_WIDTH" "$STREAM_HEIGHT" "$STREAM_REFRESH")
-    log "Verified target mode: ${current} (${STREAM_ASPECT})"
+    current=$(get_current_mode 2>/dev/null || printf '%sx%s@%s' "$TARGET_WIDTH" "$TARGET_HEIGHT" "$TARGET_REFRESH")
+    log "Verified target mode: ${current} (source=${TARGET_SOURCE})"
     log_event OUTPUT_TARGET_REACHED "$current"
 
     # Xwayland #1 (the game server) does not follow the output switch: sync it
     # explicitly and only proceed once its root geometry is the target.
-    log_event XWAYLAND1_SYNC_REQUESTED "${STREAM_XWAYLAND_SERVER_INDEX}/${STREAM_WIDTH}/${STREAM_HEIGHT}/${STREAM_XWAYLAND_ALLOW_SUPERRES}"
+    log_event XWAYLAND1_SYNC_REQUESTED "${STREAM_XWAYLAND_SERVER_INDEX}/${TARGET_WIDTH}/${TARGET_HEIGHT}/${STREAM_XWAYLAND_ALLOW_SUPERRES}"
     if ! set_stream_xwayland_mode; then
-        fail "could not request Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} mode ${STREAM_WIDTH}x${STREAM_HEIGHT}"
+        fail "could not request Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} mode ${TARGET_WIDTH}x${TARGET_HEIGHT}"
         return 1
     fi
     if ! wait_for_stream_xwayland_mode; then
         xwayland_current=$(get_xwayland_server_mode "$STREAM_XWAYLAND_SERVER_INDEX" 2>/dev/null || printf 'unknown')
-        fail "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} not ${STREAM_WIDTH}x${STREAM_HEIGHT} within ${MODE_TIMEOUT_SECONDS}s (current=$xwayland_current)"
+        fail "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} not ${TARGET_WIDTH}x${TARGET_HEIGHT} within ${MODE_TIMEOUT_SECONDS}s (current=$xwayland_current)"
         return 1
     fi
     XWAYLAND_SYNCED=1
@@ -517,7 +762,7 @@ fi
 if steam_link_streaming_active; then
     if (( ! LOCK_HELD )); then
         if ! lock_acquire; then
-            printf 'steamlink-display-wrapper: another instance is already active\n' >&2
+            printf 'steam-link-display-adapter: another instance is already active\n' >&2
             exit 73
         fi
         LOCK_HELD=1
@@ -525,9 +770,10 @@ if steam_link_streaming_active; then
     log "Steam Link streaming session detected: running display pipeline"
     log_event STREAM_DETECTED
     validate_config
+    resolve_stream_target || exit 1
     precheck
     prepare_stream_mode
-    if ! run_game "$@"; then
+    if ! run_game "${GAME_ARGS[@]}"; then
         exit 1
     fi
     exit "$GAME_EXIT_CODE"
@@ -538,4 +784,4 @@ if (( LOCK_HELD )); then
     flock -u 9 2>/dev/null || true
     exec 9>&- 2>/dev/null || true
 fi
-exec "$@"
+exec "${GAME_ARGS[@]}"

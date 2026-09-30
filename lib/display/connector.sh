@@ -6,7 +6,11 @@
 set -Eeuo pipefail
 
 get_connector_name() {
-    get_gamescope_info | awk -F': ' '/Connector Name:/ {print $2; exit}'
+    if display_backend_is desktop; then
+        desktop_get_connector_name
+    else
+        get_gamescope_info | awk -F': ' '/Connector Name:/ {print $2; exit}'
+    fi
 }
 
 get_display_make() {
@@ -18,6 +22,11 @@ get_display_model() {
 }
 
 get_display_description() {
+    if display_backend_is desktop; then
+        desktop_get_display_description
+        return
+    fi
+
     local make model
     make=$(get_display_make || true)
     model=$(get_display_model || true)
@@ -26,9 +35,11 @@ get_display_description() {
 }
 
 resolve_active_connector() {
-    # The source of truth for the connector is the Gamescope session (spec §7).
-    # CONNECTOR=auto (default) follows it; a manual override must match it,
-    # otherwise the wrapper fails closed before any display change (spec §8).
+    if display_backend_is desktop; then
+        desktop_resolve_active_connector
+        return
+    fi
+
     local gc
     gc=$(get_connector_name || true)
     if [[ -z "$gc" ]]; then
@@ -44,9 +55,17 @@ resolve_active_connector() {
 }
 
 host_connector() {
-    # Connector used for host-mode queries (spec §19-§20): the runtime one once
-    # the host profile was captured; the configured value otherwise (standalone
-    # helpers). Never a hardcoded connector.
+    # Connector used for host-mode queries: runtime connector once the host
+    # profile is captured; Desktop Mode can discover it lazily for standalone
+    # backend operations.
+    if display_backend_is desktop; then
+        if [[ -n "${ACTIVE_CONNECTOR:-}" ]]; then
+            printf '%s\n' "$ACTIVE_CONNECTOR"
+        else
+            desktop_get_connector_name
+        fi
+        return
+    fi
     printf '%s\n' "${ACTIVE_CONNECTOR:-${CONNECTOR:-auto}}"
 }
 

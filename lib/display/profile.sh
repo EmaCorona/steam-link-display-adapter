@@ -34,18 +34,21 @@ capture_host_profile() {
     description=$(get_display_description 2>/dev/null || true)
     HOST_DESCRIPTION=$description
 
-    if xwayland_server_present "$idx"; then
-        xwl=$(get_xwayland_server_mode "$idx" 2>/dev/null || true)
-        if [[ -z "$xwl" ]]; then
-            fail "unable to determine the original Xwayland #${idx} geometry (fail-closed)"
-            return 1
+    if display_backend_supports_xwayland; then
+        if xwayland_server_present "$idx"; then
+            xwl=$(get_xwayland_server_mode "$idx" 2>/dev/null || true)
+            if [[ -z "$xwl" ]]; then
+                fail "unable to determine the original Xwayland #$idx geometry (fail-closed)"
+                return 1
+            fi
+            HOST_ORIGINAL_XWAYLAND_MODE=$xwl
+        else
+            HOST_ORIGINAL_XWAYLAND_MODE=''
+            log "Xwayland #$idx not present at capture; no original geometry to record"
         fi
-        HOST_ORIGINAL_XWAYLAND_MODE=$xwl
     else
-        # Nothing to preserve for #1; the sync step still requires the server
-        # and fails closed if it cannot verify it.
         HOST_ORIGINAL_XWAYLAND_MODE=''
-        log "Xwayland #${idx} not present at capture; no original geometry to record"
+        log "Display backend '$(display_backend_name)' has no Xwayland synchronization contract"
     fi
 
     log_event HOST_PROFILE_DETECTED "connector=${HOST_CONNECTOR} mode=${HOST_ORIGINAL_MODE} xwayland=${HOST_ORIGINAL_XWAYLAND_MODE:-unavailable}"

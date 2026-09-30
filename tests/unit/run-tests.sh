@@ -56,9 +56,9 @@ fixture_begin() {
 
   unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL
   unset STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH
-  unset STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT
+  unset STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT STUB_KSCREEN_AVAILABLE STUB_KSCREEN_CONNECTOR STUB_KSCREEN_MODE_LIST STUB_KSCREEN_CURRENT_MODE STUB_KSCREEN_FAIL
   unset DRM_MODES_GLOB
-  unset HOST_CONNECTOR HOST_ORIGINAL_MODE HOST_ORIGINAL_XWAYLAND_MODE HOST_DESCRIPTION ACTIVE_CONNECTOR
+  unset HOST_CONNECTOR HOST_ORIGINAL_MODE HOST_ORIGINAL_XWAYLAND_MODE HOST_DESCRIPTION ACTIVE_CONNECTOR DISPLAY_BACKEND
   unset CLIENT_WIDTH CLIENT_HEIGHT CLIENT_FPS
   unset TARGET_WIDTH TARGET_HEIGHT TARGET_REFRESH TARGET_FPS TARGET_SOURCE TARGET_MODE_SPEC
   unset LOCAL_WIDTH LOCAL_HEIGHT LOCAL_REFRESH
@@ -271,6 +271,7 @@ EOF
 
 test_profile_and_state() {
   fixture_begin
+  DISPLAY_BACKEND=gamescope
   write_host HDMI-A-1 '2560x1440@144' '2560x1440@144 1920x1080@60'
   if capture_host_profile; then RC=0; else RC=$?; fi
   success "host profile captures the active connector" "$RC"
@@ -305,6 +306,7 @@ test_profile_and_state() {
   success "profile capture tolerates absent Xwayland server" "$RC"
   eq "absent original Xwayland geometry is empty" "$HOST_ORIGINAL_XWAYLAND_MODE" ''
 
+  DISPLAY_BACKEND=desktop
   HOST_CONNECTOR=DP-2
   HOST_ORIGINAL_MODE=3440x1440@165
   HOST_ORIGINAL_XWAYLAND_MODE=3440x1440
@@ -322,6 +324,7 @@ test_profile_and_state() {
   MODES_EXISTED=1
   SCREEN_SLEEP_REQUESTED=1
   state_write STREAMING
+  has "state persists selected backend" "$STATE_FILE" 'DISPLAY_BACKEND=desktop'
   has "state persists original connector" "$STATE_FILE" 'ORIGINAL_CONNECTOR=DP-2'
   has "state persists original mode" "$STATE_FILE" 'ORIGINAL_MODE=3440x1440@165'
   has "state persists original Xwayland" "$STATE_FILE" 'ORIGINAL_XWAYLAND_MODE=3440x1440'
@@ -401,6 +404,29 @@ Other:1280x800@60 0
   has "unrelated description is preserved" "$MODES_FILE" 'Other:1280x800@60 0'
   write_saved_mode_for_description 'New Model' 1280 800 60
   has "new description is appended" "$MODES_FILE" 'New Model:1280x800@60'
+  fixture_end
+}
+
+
+test_desktop_backend() {
+  fixture_begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST='3440x1440@165 1920x1200@60'
+  unset DISPLAY_BACKEND
+  run_expected display_backend_detect
+  success "Desktop backend is detected without Gamescope" "$RC"
+  eq "Desktop backend name" "$DISPLAY_BACKEND" 'desktop'
+  eq "Desktop connector discovery" "$(desktop_get_connector_name)" 'DP-3'
+  eq "Desktop current mode discovery" "$(desktop_get_current_mode)" '3440x1440@165'
+  eq "Desktop mode list" "$(desktop_get_host_mode_list)" $'1920x1200@60\n3440x1440@165'
+  TARGET_WIDTH=1920 TARGET_HEIGHT=1200 TARGET_REFRESH=60
+  run_expected desktop_apply_target_mode
+  success "Desktop target mode applies and verifies" "$RC"
+  eq "Desktop target is active" "$(desktop_get_current_mode)" '1920x1200@60'
+  HOST_ORIGINAL_MODE='3440x1440@165'
+  run_expected desktop_restore_host_state
+  success "Desktop host mode restores" "$RC"
+  eq "Desktop original mode is active" "$(desktop_get_current_mode)" '3440x1440@165'
   fixture_end
 }
 
@@ -486,6 +512,10 @@ printf '\n'
 
 printf '%s\n' '--- snapshot ---'
 test_snapshot
+printf '\n'
+
+printf '%s\n' '--- desktop backend ---'
+test_desktop_backend
 printf '\n'
 
 printf '%s\n' '--- config/system/logging ---'

@@ -7,7 +7,7 @@
 # Every concrete interaction with DRM, Xwayland, the state files or the logs is
 # delegated to the domain modules.
 #
-# Steam launch wrapper for Bazzite Game Mode / Gamescope.
+# Steam launch wrapper for Bazzite Game Mode / Gamescope and KDE Desktop Mode.
 # Host-agnostic: the physical display (connector, current mode, description and
 # the original Xwayland #1 geometry) is discovered at runtime before any
 # modification; the stream geometry is resolved dynamically from the Steam Link
@@ -32,8 +32,8 @@
 #
 # IMPORTANT:
 # - This wrapper is intentionally fail-closed.
-# - It NEVER turns the physical display off unless the target Gamescope mode
-#   was verified first.
+# - Game Mode only sleeps the physical display after the target Gamescope mode
+#   is verified; Desktop Mode leaves the display powered.
 # - The order of the phases below is the behaviour contract; do not reorder.
 
 set -Eeuo pipefail
@@ -78,91 +78,15 @@ cleanup() {
     CLEANUP_DONE=1
 
     log "Cleanup started (state=$(state_phase || true))"
-    # RESTORING is the transitional phase of the state machine (spec §12).
     if (( SETUP_DONE )); then
         state_write 'RESTORING'
     fi
 
-    # Safety priority: wake the monitor first.
-    if (( SCREEN_SLEEP_REQUESTED )); then
-        if screen_wake; then
-            log "External screen wake requested"
-        else
-            log "CRITICAL: failed to wake external screen"
-        fi
-        SCREEN_SLEEP_REQUESTED=0
+    if ! display_backend_restore_host_state; then
+        log "CRITICAL: display backend restore failed"
     fi
 
-    if (( BACKUP_TAKEN || STALE_STATE_LOADED )) && [[ -f "$MODES_BACKUP" ]]; then
-        if restore_modes_file; then
-            log "modes.cfg restored from backup"
-        else
-            log "CRITICAL: failed to restore modes.cfg"
-        fi
-    else
-        log "No modes.cfg snapshot owned by this run; leaving modes.cfg untouched"
-    fi
-
-    # Original display state for this restore: the profile captured for this
-    # session, the profile saved by the recovered state, or the legacy
-    # configuration for old state files (spec §13-§17). Never guessed.
-    local original_mode original_xwl
-    original_mode=$(original_mode_for_restore)
-    original_xwl=$(original_xwayland_mode_for_restore)
-
-    if (( BACKUP_TAKEN || STALE_STATE_LOADED )) && command -v xprop >/dev/null 2>&1 && [[ -n "${GAMESCOPE_DISPLAY:-${DISPLAY:-}}" ]]; then
-        if nudge_mode; then
-            log "Gamescope local-mode nudge sent"
-            if [[ -n "$original_mode" ]]; then
-                if wait_for_original_mode "$original_mode"; then
-                    log "Verified original mode: $original_mode"
-                else
-                    log "CRITICAL: original mode verification timed out"
-                fi
-            else
-                log "WARNING: no original mode recorded; skipping mode verification"
-            fi
-        else
-            log "CRITICAL: failed to nudge Gamescope during restore"
-        fi
-    fi
-
-    if (( BACKUP_TAKEN || STALE_STATE_LOADED )) && command -v gamescopectl >/dev/null 2>&1; then
-        if set_dynamic_modes_allowed 0; then
-            log "Dynamic external display modes disabled"
-        else
-            log "WARNING: failed to disable dynamic external display modes"
-        fi
-    fi
-
-    # Xwayland #1 does not follow the output switch (measured live in Gaming
-    # Mode 2026-09-29: the output change updated only server #0). Whenever this
-    # run restored the output -- its own snapshot or a recovered stale state --
-    # bring #1 back to the original host geometry discovered at runtime (spec
-    # §14), independently of the XWAYLAND_SYNCED field: a state written by an
-    # older build does not carry it.
-    if (( BACKUP_TAKEN || STALE_STATE_LOADED )); then
-        if xwayland_server_present "$STREAM_XWAYLAND_SERVER_INDEX"; then
-            log_event XWAYLAND1_RESTORE "${STREAM_XWAYLAND_SERVER_INDEX}/${original_xwl:-unavailable}"
-            if [[ -n "$original_xwl" ]]; then
-                if restore_stream_xwayland_mode "$original_xwl"; then
-                    log "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} restored to ${original_xwl}"
-                else
-                    log "WARNING: could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} geometry"
-                fi
-            else
-                log "WARNING: no original Xwayland geometry recorded; skipping restore"
-            fi
-        else
-            log "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} not present; nothing to restore"
-        fi
-        XWAYLAND_SYNCED=0
-    fi
-
-    rm -f -- "$MODES_BACKUP" 2>/dev/null || true
     state_clear
-    # The client hint is valid for the current session only (spec §28): drop it
-    # so the next stream recomputes its own target from scratch.
     CLIENT_WIDTH=''; CLIENT_HEIGHT=''; CLIENT_FPS=''
     TARGET_WIDTH=''; TARGET_HEIGHT=''; TARGET_REFRESH=''; TARGET_FPS=''; TARGET_SOURCE=''; TARGET_MODE_SPEC=''
     log "Cleanup finished"
@@ -171,7 +95,7 @@ cleanup() {
 }
 
 recover_stale_state() {
-    local previous stale_backup stale_existed stale_synced verify_mode stale_xwl stale_connector
+    local previous saved_backend verify_mode stale_xwl
     previous=$(state_phase || true)
     [[ -n "$previous" ]] || return 0
 
@@ -179,77 +103,23 @@ recover_stale_state() {
     log "Running conservative recovery before starting new game"
     STALE_STATE_LOADED=1
 
-    stale_backup=$(sed -n 's/^MODES_BACKUP=//p' "$STATE_FILE" | head -n1 || true)
-    stale_existed=$(sed -n 's/^MODES_EXISTED=//p' "$STATE_FILE" | head -n1 || true)
-    stale_synced=$(sed -n 's/^XWAYLAND_SYNCED=//p' "$STATE_FILE" | head -n1 || true)
-    [[ -n "$stale_backup" ]] && MODES_BACKUP=$stale_backup
-    MODES_EXISTED=${stale_existed:-0}
-    XWAYLAND_SYNCED=${stale_synced:-0}
+    saved_backend=$(state_field DISPLAY_BACKEND 2>/dev/null || true)
+    if [[ -n "$saved_backend" ]]; then
+        DISPLAY_BACKEND=$saved_backend
+        log "Recovered display backend from state: $DISPLAY_BACKEND"
+    elif ! display_backend_detect; then
+        log "ERROR: stale state exists but no display backend is available"
+        return 1
+    fi
 
-    # The interrupted run's saved host profile is the authoritative restore
-    # reference (spec §16): the current configuration is never used to guess
-    # it. State files written by older builds fall back to the legacy
-    # configuration when it is still present (spec §17).
     verify_mode=$(original_mode_for_restore)
     stale_xwl=$(original_xwayland_mode_for_restore)
-    stale_connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
-    log "Saved run profile: connector=${stale_connector:-unknown} mode=${verify_mode:-unavailable} xwayland=${stale_xwl:-unavailable}"
+    log "Saved run profile: connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true) mode=${verify_mode:-unavailable} xwayland=${stale_xwl:-unavailable}"
 
-    if ! screen_wake; then
-        log "ERROR: stale-state recovery could not wake external screen"
+    if ! display_backend_recover_stale_state; then
         return 1
     fi
 
-    if [[ -f "$MODES_BACKUP" ]]; then
-        if ! restore_modes_file; then
-            log "ERROR: stale-state recovery could not restore modes.cfg"
-            return 1
-        fi
-    else
-        log "ERROR: stale state exists but backup is missing"
-        return 1
-    fi
-
-    if [[ -n "${GAMESCOPE_DISPLAY:-${DISPLAY:-}}" ]]; then
-        if ! nudge_mode; then
-            log "ERROR: stale-state recovery could not nudge Gamescope"
-            return 1
-        fi
-        if [[ -n "$verify_mode" ]]; then
-            if ! wait_for_original_mode "$verify_mode"; then
-                log "ERROR: stale-state recovery could not verify the original mode"
-                return 1
-            fi
-            log "Verified original mode: $verify_mode"
-        else
-            log "WARNING: no original mode recorded (state without a saved profile); skipping mode verification"
-        fi
-    fi
-
-    if ! set_dynamic_modes_allowed 0; then
-        log "ERROR: stale-state recovery could not disable dynamic modes"
-        return 1
-    fi
-
-    if xwayland_server_present "$STREAM_XWAYLAND_SERVER_INDEX"; then
-        if [[ -n "$stale_xwl" ]]; then
-            if restore_stream_xwayland_mode "$stale_xwl"; then
-                log "Stale-state recovery restored Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} to ${stale_xwl}"
-            else
-                log "WARNING: stale-state recovery could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX}"
-            fi
-        else
-            log "WARNING: stale-state recovery: no original Xwayland geometry recorded; skipping"
-        fi
-    fi
-    XWAYLAND_SYNCED=0
-
-    # Hand the recovered profile to the rest of the run: a following cleanup
-    # repeats the restore idempotently with the same values.
-    HOST_ORIGINAL_MODE=${verify_mode:-${HOST_ORIGINAL_MODE:-}}
-    HOST_ORIGINAL_XWAYLAND_MODE=${stale_xwl:-${HOST_ORIGINAL_XWAYLAND_MODE:-}}
-
-    rm -f -- "$MODES_BACKUP" 2>/dev/null || true
     state_clear
     log "Stale-state recovery complete"
 }
@@ -355,117 +225,34 @@ resolve_stream_target() {
 }
 
 precheck() {
-    require_cmd gamescopectl
-    require_cmd xprop
-    require_cmd xdpyinfo
-    require_cmd flock
-    require_cmd journalctl
+    display_backend_precheck || return 1
 
-    [[ -n "${GAMESCOPE_DISPLAY:-${DISPLAY:-}}" ]] || fail "DISPLAY/GAMESCOPE_DISPLAY is not set"
-
-    # The connector and the manual-override check are resolved during the host
-    # profile discovery, before any mutation (spec §7-§8).
     [[ -n "${ACTIVE_CONNECTOR:-}" ]] || {
-        fail "the active Gamescope connector was not resolved"
+        fail "the active display connector was not resolved"
         return 1
     }
-    log "Gamescope connector verified: $ACTIVE_CONNECTOR"
 
     mode_list_contains "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}" || {
-        fail "Gamescope does not currently advertise ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+        fail "$(display_backend_name) does not currently advertise ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
         return 1
     }
 
-    log "Target mode is advertised by Gamescope"
+    log "Target mode is advertised by $(display_backend_name)"
 }
 
-prepare_stream_mode() {
-    local description current xwayland_current
-    log_event OUTPUT_PREPARE_START
-    # The description was captured with the host profile before any mutation;
-    # a fresh read is only a fallback for a momentary gap at capture time.
-    description="${HOST_DESCRIPTION:-}"
-    [[ -n "$description" ]] || description=$(get_display_description || true)
-    [[ -n "$description" ]] || {
-        fail "unable to determine Gamescope display description"
-        return 1
-    }
 
-    log "Gamescope display description: $description"
-
-    # Warm-up re-poll (candidate mitigation, measured 2026-09-28): every launch
-    # preceded by the stale-recovery cycle survived (3/3), while direct "clean"
-    # launches crashed 5/5 in Steam's capture pipeline (libavutil/pipes asserts).
-    # Reproduce the recovery's extra connector re-poll before the stream switch
-    # and let it settle.
-    set_dynamic_modes_allowed 1 || true
-    if nudge_mode; then
-        log "Warm-up re-poll sent"
-        sleep 0.5
-    else
-        log "WARNING: warm-up re-poll failed (continuing)"
-    fi
-
-    backup_modes_file
-    state_write 'PREPARING'
-    write_saved_mode_for_description "$description" "$TARGET_WIDTH" "$TARGET_HEIGHT" "$TARGET_REFRESH"
-
-    set_dynamic_modes_allowed 1
-    log "Dynamic external display modes enabled"
-
-    if ! nudge_mode; then
-        fail "Gamescope mode re-poll failed"
-        return 1
-    fi
-    log "Gamescope display-mode nudge sent"
-
-    if ! wait_for_target_mode; then
-        current=$(get_current_mode 2>/dev/null || printf 'unknown')
-        fail "target mode not reached within ${MODE_TIMEOUT_SECONDS}s (current=$current)"
-        return 1
-    fi
-
-    current=$(get_current_mode 2>/dev/null || printf '%sx%s@%s' "$TARGET_WIDTH" "$TARGET_HEIGHT" "$TARGET_REFRESH")
-    log "Verified target mode: ${current} (source=${TARGET_SOURCE})"
-    log_event OUTPUT_TARGET_REACHED "$current"
-
-    # Xwayland #1 (the game server) does not follow the output switch: sync it
-    # explicitly and only proceed once its root geometry is the target.
-    log_event XWAYLAND1_SYNC_REQUESTED "${STREAM_XWAYLAND_SERVER_INDEX}/${TARGET_WIDTH}/${TARGET_HEIGHT}/${STREAM_XWAYLAND_ALLOW_SUPERRES}"
-    if ! set_stream_xwayland_mode; then
-        fail "could not request Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} mode ${TARGET_WIDTH}x${TARGET_HEIGHT}"
-        return 1
-    fi
-    if ! wait_for_stream_xwayland_mode; then
-        xwayland_current=$(get_xwayland_server_mode "$STREAM_XWAYLAND_SERVER_INDEX" 2>/dev/null || printf 'unknown')
-        fail "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} not ${TARGET_WIDTH}x${TARGET_HEIGHT} within ${MODE_TIMEOUT_SECONDS}s (current=$xwayland_current)"
-        return 1
-    fi
-    XWAYLAND_SYNCED=1
-    XWAYLAND_SYNC_CONFIRMED_NS=$(date +%s%N)
-    log_event XWAYLAND1_SYNC_CONFIRMED "$(get_xwayland_server_mode "$STREAM_XWAYLAND_SERVER_INDEX" 2>/dev/null || true)"
-    # PREPARED: output + Xwayland #1 are both at the target, before GAME_LAUNCH
-    # (spec §12 sequence: OUT/XWAYLAND_READY -> PREPARED -> GAME_LAUNCH).
-    state_write 'PREPARED'
-
-    SCREEN_SLEEP_REQUESTED=1
-    if ! screen_sleep; then
-        fail "failed to put the external screen to sleep"
-        return 1
-    fi
-    log "External screen sleep requested"
-
-    state_write 'STREAMING'
-    SETUP_DONE=1
-}
 
 run_game() {
     local now_ns
     now_ns=$(date +%s%N)
-    # Invariant (spec): the game must not start before Xwayland #1 was confirmed.
-    if (( XWAYLAND_SYNC_CONFIRMED_NS == 0 || now_ns <= XWAYLAND_SYNC_CONFIRMED_NS )); then
-        fail "refusing to launch: XWAYLAND1_SYNC_CONFIRMED must precede GAME_LAUNCH"
-        return 1
+    # Gamescope requires explicit Xwayland #1 synchronization. Desktop Mode
+    # has no Gamescope Xwayland control contract, so the invariant is scoped to
+    # the backend that provides it.
+    if display_backend_supports_xwayland; then
+        if (( XWAYLAND_SYNC_CONFIRMED_NS == 0 || now_ns <= XWAYLAND_SYNC_CONFIRMED_NS )); then
+            fail "refusing to launch: XWAYLAND1_SYNC_CONFIRMED must precede GAME_LAUNCH"
+            return 1
+        fi
     fi
 
     log_event GAME_LAUNCH "$(printf '%q ' "$@")"
@@ -490,6 +277,16 @@ sl_wrapper_main() {
 
     LOCK_HELD=0
 
+    # Detect the runtime display backend before deciding whether the display
+    # pipeline can be used. Gamescope remains first; KDE Desktop Mode is a
+    # separate backend with the same lifecycle contract.
+    if [[ ! -f "$STATE_FILE" ]]; then
+        if ! display_backend_detect; then
+            log "No supported display backend detected: bypassing display pipeline"
+            exec "${GAME_ARGS[@]}"
+        fi
+    fi
+
     # Stale-state recovery has priority over the bypass decision: a previous
     # interrupted run may have left the display in a modified state.
     if [[ -f "$STATE_FILE" ]]; then
@@ -498,6 +295,16 @@ sl_wrapper_main() {
             recover_stale_state || log "WARNING: stale-state recovery failed; continuing"
         else
             log "WARNING: another instance is active; skipping stale-state recovery"
+        fi
+    fi
+
+    # A successful stale recovery clears the state and hands control back to
+    # the current session. Re-detect the backend so a transition between
+    # Game Mode and Desktop Mode cannot inherit the old backend selection.
+    if [[ ! -f "$STATE_FILE" ]]; then
+        if ! display_backend_detect; then
+            log "No supported display backend detected after recovery: bypassing display pipeline"
+            exec "${GAME_ARGS[@]}"
         fi
     fi
 
@@ -518,7 +325,7 @@ sl_wrapper_main() {
         capture_host_profile || exit 1
         resolve_stream_target || exit 1
         precheck
-        prepare_stream_mode
+        display_backend_prepare_stream
         if ! run_game "${GAME_ARGS[@]}"; then
             exit 1
         fi

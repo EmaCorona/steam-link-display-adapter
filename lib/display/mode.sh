@@ -56,7 +56,7 @@ get_gamescope_mode_list() {
     printf '%s\n' "$list"
 }
 
-get_host_mode_list() {
+gamescope_get_host_mode_list() {
     # Mode candidates the host really advertises, one "WxH" or "WxH@R" per line.
     # Sources in order (spec §12): Gamescope X atom, modes.cfg, kernel ModeDB.
     local list line mode found=0 modes_file f
@@ -81,7 +81,7 @@ get_host_mode_list() {
     return 1
 }
 
-mode_list_contains() {
+gamescope_mode_list_contains() {
     local wanted=$1 list line mode res f modes_file
     if list=$(get_gamescope_mode_list) && [[ -n "$list" ]]; then
         tr ' ' '\n' <<<"$list" | grep -Fxq "$wanted"
@@ -109,7 +109,7 @@ mode_list_contains() {
     return 1
 }
 
-get_current_mode() {
+gamescope_get_current_mode() {
     require_cmd journalctl || return 1
     local line mode
     # Read the DRM mode from the session log. X geometry/refresh atoms are not
@@ -121,7 +121,7 @@ get_current_mode() {
     printf '%s\n' "$mode"
 }
 
-is_target_mode_active() {
+gamescope_is_target_mode_active() {
     local current res tw th cw ch
     res="${TARGET_WIDTH:-$STREAM_WIDTH}x${TARGET_HEIGHT:-$STREAM_HEIGHT}"
     current=$(get_current_mode 2>/dev/null || true)
@@ -142,7 +142,7 @@ is_target_mode_active() {
     [[ "$cw" == "$tw" && "$ch" == "$th" ]]
 }
 
-is_original_mode_active() {
+gamescope_is_original_mode_active() {
     # True when the DRM mode is the one the display must go back to (spec §13):
     # the original host mode captured at session start, recovered from the
     # state file, or passed explicitly by the caller.
@@ -151,25 +151,25 @@ is_original_mode_active() {
     [[ "$(get_current_mode 2>/dev/null || true)" == "$expected" ]]
 }
 
-set_dynamic_modes_allowed() {
+gamescope_set_dynamic_modes_allowed() {
     require_cmd gamescopectl
     GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}" \
         gamescopectl drm_allow_dynamic_modes_for_external_display "$1" >/dev/null
 }
 
-screen_sleep() {
+gamescope_screen_sleep() {
     require_cmd gamescopectl
     GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}" \
         gamescopectl drm_sleep_external_screen 1 >/dev/null
 }
 
-screen_wake() {
+gamescope_screen_wake() {
     require_cmd gamescopectl
     GAMESCOPE_WAYLAND_DISPLAY="${GAMESCOPE_WAYLAND_DISPLAY:-gamescope-0}" \
         gamescopectl drm_sleep_external_screen 0 >/dev/null
 }
 
-nudge_mode() {
+gamescope_nudge_mode() {
     require_cmd gamescopectl || return 1
     # Re-poll the backend so gamescope re-runs connector setup and picks up the
     # saved mode written to modes.cfg. Polling/verification always follows; a
@@ -178,7 +178,7 @@ nudge_mode() {
         gamescopectl backend_set_dirty >/dev/null
 }
 
-wait_for_target_mode() {
+gamescope_wait_for_target_mode() {
     local deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
     while (( SECONDS <= deadline )); do
         if is_target_mode_active; then
@@ -189,7 +189,7 @@ wait_for_target_mode() {
     return 1
 }
 
-wait_for_original_mode() {
+gamescope_wait_for_original_mode() {
     local want=${1:-${HOST_ORIGINAL_MODE:-}} deadline
     [[ -n "$want" ]] || return 1
     deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
@@ -200,4 +200,72 @@ wait_for_original_mode() {
         sleep "$POLL_INTERVAL_SECONDS"
     done
     return 1
+}
+
+
+# Backend-neutral display operations. The Gamescope implementation above is
+# retained unchanged behind this dispatch layer; Desktop Mode is implemented
+# by the KDE/KScreen backend.
+get_host_mode_list() {
+    if display_backend_is desktop; then desktop_get_host_mode_list; else gamescope_get_host_mode_list; fi
+}
+
+mode_list_contains() {
+    if display_backend_is desktop; then desktop_mode_list_contains "$1"; else gamescope_mode_list_contains "$1"; fi
+}
+
+get_current_mode() {
+    if display_backend_is desktop; then desktop_get_current_mode; else gamescope_get_current_mode; fi
+}
+
+is_target_mode_active() {
+    if display_backend_is desktop; then desktop_is_target_mode_active; else gamescope_is_target_mode_active; fi
+}
+
+is_original_mode_active() {
+    if display_backend_is desktop; then
+        local expected=${1:-${HOST_ORIGINAL_MODE:-}}
+        [[ -n "$expected" ]] || return 1
+        local current
+        current=$(desktop_get_current_mode 2>/dev/null || true)
+        [[ "$current" == "$expected" ]]
+    else
+        gamescope_is_original_mode_active "$@"
+    fi
+}
+
+set_dynamic_modes_allowed() {
+    if display_backend_is desktop; then return 0; else gamescope_set_dynamic_modes_allowed "$@"; fi
+}
+
+screen_sleep() {
+    if display_backend_is desktop; then return 0; else gamescope_screen_sleep "$@"; fi
+}
+
+screen_wake() {
+    if display_backend_is desktop; then return 0; else gamescope_screen_wake "$@"; fi
+}
+
+nudge_mode() {
+    if display_backend_is desktop; then return 0; else gamescope_nudge_mode "$@"; fi
+}
+
+wait_for_target_mode() {
+    local deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
+    while (( SECONDS <= deadline )); do
+        if is_target_mode_active; then return 0; fi
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    return 1
+}
+
+wait_for_original_mode() {
+    local want=${1:-${HOST_ORIGINAL_MODE:-}} deadline
+    [[ -n "$want" ]] || return 1
+    local current
+    if display_backend_is desktop; then
+        desktop_wait_for_original_mode "$want"
+    else
+        gamescope_wait_for_original_mode "$want"
+    fi
 }

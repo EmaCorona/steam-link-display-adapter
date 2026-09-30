@@ -24,6 +24,9 @@ sl_load detection/gamescope.sh
 sl_load detection/steam-link.sh
 sl_load display/connector.sh
 sl_load display/mode.sh
+sl_load display/gamescope.sh
+sl_load display/desktop.sh
+sl_load display/backend.sh
 sl_load display/profile.sh
 sl_load resolution/resolver.sh
 sl_load xwayland/mode.sh

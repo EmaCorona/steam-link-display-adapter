@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Test stub for KDE kscreen-doctor.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+
+[[ "${STUB_KSCREEN_AVAILABLE:-0}" == 1 ]] || exit 127
+
+connector=${STUB_KSCREEN_CONNECTOR:-DP-3}
+modes=${STUB_KSCREEN_MODE_LIST:-3440x1440@165 1920x1200@60}
+current=$(cat "$SD/kscreen_mode" 2>/dev/null || printf '%s' "${STUB_KSCREEN_CURRENT_MODE:-3440x1440@165}")
+
+if [[ "${1:-}" == "-o" || "${1:-}" == "--outputs" ]]; then
+    printf 'Output: 1 %s\n' "$connector"
+    printf '    enabled\n'
+    printf '    connected\n'
+    printf '    priority 1\n'
+    printf '    DisplayPort\n'
+    printf '    Modes:'
+    i=1
+    for mode in $modes; do
+        marker=
+        [[ "$mode" == "$current" ]] && marker='*'
+        printf ' %s:%s%s' "$i" "$mode" "$marker"
+        i=$((i + 1))
+    done
+    printf '\n'
+    printf '    Geometry: 0,0 %s\n' "${current%@*}"
+    exit 0
+fi
+
+if [[ "${1:-}" == "output."*".mode."* ]]; then
+    arg=${1#output.}
+    connector_arg=${arg%%.mode.*}
+    mode=${arg#*.mode.}
+    [[ "$connector_arg" == "$connector" ]] || exit 2
+    [[ " $modes " == *" $mode "* ]] || exit 9
+    [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
+    printf '%s\n' "$mode" >"$SD/kscreen_mode"
+    printf '%s\n' "$mode" >>"$SD/kscreen.log"
+    exit 0
+fi
+
+exit 0

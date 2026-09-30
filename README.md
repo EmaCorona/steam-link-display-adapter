@@ -1,15 +1,18 @@
 # Steam Link Display Adapter
 
-> Dynamic display adaptation for Steam Remote Play on Bazzite/Game Mode.
+> Dynamic display adaptation for Steam Remote Play on Bazzite Game Mode and KDE Plasma Desktop Mode.
 
 Steam Link can request a different resolution and aspect ratio than the host's physical display.
 
-The adapter is **host-agnostic**: the active Gamescope display, its current mode and its available
-modes are discovered **at runtime**. The host display does not need to be configured. The client
-resolution comes from Steam Remote Play; the host resolution comes from Gamescope/DRM.
+The adapter is **host-agnostic**: the active display backend, its connector, current mode and
+available modes are discovered **at runtime**. Game Mode uses Gamescope; Desktop Mode uses KDE/KScreen.
+The host display does not need to be configured. The client resolution comes from Steam Remote Play;
+the host capabilities come from the backend that is active at runtime.
 
-This wrapper temporarily adapts Gamescope to the Steam Link client's resolution, synchronizes Xwayland
-and restores the original host state when the session ends.
+This wrapper temporarily adapts the active display backend to the Steam Link client's resolution and
+restores the original host state when the session ends. In Game Mode it also synchronizes Xwayland #1
+and can sleep the physical display; Desktop Mode changes the KDE output mode through KScreen without
+Gamescope or Xwayland changes.
 
 **No root, no changes to Steam, Proton, Wine or DXVK/VKD3D: it is a per-game Launch Option.**
 
@@ -51,9 +54,9 @@ session ends
     original host state restored
 ```
 
-The same flow works with any host — for example a `3440×1440` ultrawide, a `2560×1440` or a `3840×2160`
-panel — without editing the configuration: connector, current mode and available modes are discovered
-at runtime.
+The same flow works with any supported host display — for example a `3440×1440` ultrawide, a
+`2560×1440` or a `3840×2160` panel — without editing the configuration: the active connector,
+current mode and available modes are discovered at runtime from Gamescope/DRM or KDE/KScreen.
 
 You do not need to know what Gamescope, Xwayland, DRM or PipeWire are to use it: those details live in
 [`docs/`](docs/).
@@ -62,23 +65,25 @@ You do not need to know what Gamescope, Xwayland, DRM or PipeWire are to use it:
 
 ### Host-agnostic display
 
-The host display is never configured manually and never assumed:
+The active display backend is discovered at runtime and is never hard-coded:
 
 ```text
-Gamescope / DRM
-    connector
-    current mode
-    display description
-    available modes
-        ↓
-host capabilities
-        ↓
-runtime target
+Gamescope / DRM              KDE / KScreen
+    connector                   output
+    current mode                current mode
+    display description         display output
+    available modes             available modes
+             \                 /
+              \               /
+               host capabilities
+                     ↓
+               runtime target
 ```
 
-Connector, original mode and the original Xwayland geometry are discovered at runtime, saved in the run
-state and used for the restore: the same installation works on different machines with no configuration
-edits.
+Gamescope is selected when a Gamescope session is available; otherwise the KDE/KScreen backend is used
+in Desktop Mode. Connector, original mode and (in Game Mode) the original Xwayland #1 geometry are
+discovered at runtime, saved in the run state and used for the restore: the same installation works on
+different machines and between Game Mode and Desktop Mode without configuration edits.
 
 
 ### Dynamic client resolution
@@ -93,12 +98,14 @@ mode resolver
 host-compatible target
 ```
 
-The resolver weighs aspect ratio, resolution, refresh rate, pixel difference and the client framerate.
+The resolver weighs aspect ratio, resolution, refresh rate, pixel difference and the client framerate
+against the modes advertised by the active display backend.
 
 
 ### Race-condition handling
 
-The project does **not** assume the Steam Link session is already up when the game is launched.
+The project does **not** assume the Steam Link session is already up when the game is launched, in
+either Game Mode or Desktop Mode.
 
 ```text
 launch game
@@ -140,7 +147,7 @@ CLEANUP
 
 ### Xwayland synchronization
 
-The display output and the game's Xwayland server are **not** treated as the same entity:
+Game Mode keeps the display output and the game's Xwayland #1 server as **two distinct states**:
 
 ```text
 Gamescope output
@@ -150,7 +157,10 @@ Xwayland #1
 same target geometry
 ```
 
-The game is launched only after the synchronization is confirmed.
+The game is launched only after the Xwayland synchronization is confirmed.
+
+Desktop Mode has no Gamescope Xwayland control contract, so the backend changes the KDE output mode
+through KScreen and launches the game without an Xwayland mode synchronization step.
 
 
 ### Fail-closed design
@@ -189,6 +199,7 @@ The suite does not require:
 ```text
 - a real monitor
 - a real Gamescope session
+- a real KDE/KScreen session
 - a real Steam installation
 - a real game
 ```
@@ -215,25 +226,25 @@ Advanced configuration is optional (see [Configuration](#configuration)).
 
 ```text
 Bazzite
-Gaming Mode
-Gamescope
+Gaming Mode (Gamescope) or Desktop Mode (KDE Plasma)
 Steam Remote Play / Steam Link
 ```
 
 ### System tools
 
 ```text
-gamescopectl
-xprop
-xdpyinfo
-journalctl
+gamescopectl (Game Mode)
+xprop / xdpyinfo (Game Mode)
+kscreen-doctor (Desktop Mode)
+journalctl (Game Mode)
 pactl / pw-cli
 flock
 ```
 
-The target mode must exist in the mode set of the active connector (for example `video=DP-1:1920x1080@60`
-on the kernel command line). Read-only check — replace the connector with the one reported by
-`steam-link-display-adapter-verify-environment`:
+The target mode must exist in the mode set advertised by the active display backend: in Game Mode,
+the candidates come from Gamescope/DRM; in Desktop Mode the active KDE output and its advertised modes
+come from `kscreen-doctor`. Read-only check for a DRM connector — replace `HDMI-A-1` with the
+connector reported by `steam-link-display-adapter-verify-environment`:
 
 ```bash
 cat /sys/class/drm/card*-HDMI-A-1/modes
@@ -259,21 +270,24 @@ Resolution resolver
         ▼
 Target display mode
         │
-        ├── Gamescope output
+        ├── Game Mode
+        │     ├── Gamescope output
+        │     └── Xwayland #1
         │
-        └── Xwayland #1
-                │
-                ▼
-             Game launch
-                │
-                ▼
-             Steam capture
-                │
-                ▼
-              Cleanup
-                │
-                ▼
-          Original state
+        └── Desktop Mode
+              └── KDE/KScreen output
+                        │
+                        ▼
+                     Game launch
+                        │
+                        ▼
+                     Steam capture
+                        │
+                        ▼
+                      Cleanup
+                        │
+                        ▼
+                  Original state
 ```
 
 ### Without an active Steam Link session
@@ -286,7 +300,8 @@ Steam Link inactive
     → game launched normally
 ```
 
-In Desktop Mode, or in Game Mode with no stream running, the display is left untouched.
+In both Desktop Mode and Game Mode, when no stream is active after the bounded detection window, the
+display is left untouched and the game is launched normally.
 
 ## Launch Option
 
@@ -349,6 +364,16 @@ No original host profile captured
 No verified target
 → no display modification
 → no game launch
+
+Game Mode
+→ synchronize Xwayland #1
+→ sleep the physical display only after the target is verified
+→ restore the display on cleanup
+
+Desktop Mode
+→ change only the KDE output mode
+→ leave the physical display powered
+→ restore the original mode on cleanup
 ```
 
 And for an interrupted session:
@@ -366,11 +391,12 @@ CONNECTOR='auto'
 STREAM_MODE='auto'
 ```
 
-The host display does not need to be configured: connector, current mode and the original Xwayland
-geometry are detected at runtime. `CONNECTOR='auto'` follows the connector selected by Gamescope; a
-manual override (for example `'HDMI-A-1'`) is verified against the active connector, otherwise the
-wrapper fails closed without touching the display. `STREAM_*` values (fallback / fixed) are optional
-preferences.
+The host display does not need to be configured: connector and current mode are detected at runtime.
+In Game Mode, `CONNECTOR='auto'` follows the connector selected by Gamescope; in Desktop Mode it
+follows the active KDE/KScreen output. A manual override (for example `'HDMI-A-1'`) is verified against
+the active output/connector, otherwise the wrapper fails closed without touching the display. In Game
+Mode the original Xwayland #1 geometry is also captured at runtime. `STREAM_*` values (fallback /
+fixed) are optional preferences.
 
 The complete list of options is in
 [`config/steam-link-display-adapter.conf.example`](config/steam-link-display-adapter.conf.example).
@@ -388,7 +414,8 @@ Logs:
 ~/.local/state/steam-link-display-adapter/
 ```
 
-The same directory also holds the transient run state, the lock and the `modes.cfg` snapshot.
+The same directory also holds the transient run state, the lock and (when applicable) the `modes.cfg`
+snapshot.
 
 ## Project structure
 
@@ -397,7 +424,8 @@ bin/       entrypoints (public commands): paths, module loading, invocation
 lib/       internal library, one area per responsibility
   core/        orchestration (workflow, CLI, configuration, loader)
   detection/   environment state (Steam Link session, Gamescope)
-  display/     connector identity, host profile and DRM modes
+  display/     backend selection, Gamescope/KMS and KDE/KScreen output control,
+               connector identity, host profile and modes
   resolution/  which mode to use (resolver)
   xwayland/    Xwayland #1 server
   state/       run state, modes.cfg snapshot, lock
@@ -420,13 +448,14 @@ docs/technical/    implementation details, measurements and deviations
 
 ## Limitations
 
-- Detection is bounded (default 5 s window). In Desktop Mode the launch stays immediate; in Game Mode
-  with no stream the launch waits at most for that window.
+- Detection is bounded (default 5 s window). When no stream is currently active, launching the game can
+  wait up to that window in both Game Mode and Desktop Mode so a newly established Steam Link session
+  can be detected.
 - The client hint is read once, before preparing the session, and only if it is recent (default 10 s):
   the target does not change while a stream is already running.
 - If the client mode does not exist on the host, the resolver picks an aspect-compatible mode (or the
-  configured fallback), never an arbitrary one: the target resolution must be supported by the host's
-  Gamescope/DRM mode set, or a compatible host mode must exist.
+  configured fallback), never an arbitrary one: the target resolution must be supported by the active
+  display backend's mode set, or a compatible host mode must exist.
 - Without a usable client hint, `auto` targets the original host mode (host-safe fallback) instead of a
   configured value.
 - No cleanup after `SIGKILL`, panic or power loss: the leftover state is recovered at the next launch.

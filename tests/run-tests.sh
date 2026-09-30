@@ -58,7 +58,7 @@ begin() {
   export XWAYLAND_EXTRA_DISPLAYS=":98"
   export STUB_XWL1_DISPLAY=:98
   export STUB_XWL0_DISPLAY=:99
-  unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT DRM_MODES_GLOB 2>/dev/null || true
+  unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT STUB_KSCREEN_AVAILABLE STUB_KSCREEN_CONNECTOR STUB_KSCREEN_MODE_LIST STUB_KSCREEN_CURRENT_MODE STUB_KSCREEN_FAIL STUB_STREAM_ON_SUBSCRIBE DRM_MODES_GLOB 2>/dev/null || true
   unset STREAM_MODE STREAM_CAPTURE_HINT_MAX_AGE_SECONDS STREAM_NO_COMPATIBLE_FALLBACK STREAM_ASPECT_TOLERANCE STEAM_STREAM_LOG STEAM_STREAM_LOG_PREV LOCAL_WIDTH LOCAL_HEIGHT LOCAL_REFRESH STREAM_ALT_REFRESHES 2>/dev/null || true
   export STUB_STREAM_ACTIVE=1
   mkdir -p "$HOME/.config/gamescope" "$XDG_CONFIG_HOME/steam-link-display-adapter" "$XDG_STATE_HOME/steam-link-display-adapter" "$STUB_STATE_DIR"
@@ -72,6 +72,7 @@ begin() {
   STDERR="$SANDBOX/stderr"
   printf 'StubMake StubModel:3440x1440@165 0\n' >"$MODESF"
   printf '3440x1440@165\n' >"$STUB_STATE_DIR/mode"
+  printf '3440x1440@165\n' >"$STUB_STATE_DIR/kscreen_mode"
   printf '3440x1440\n' >"$STUB_STATE_DIR/xwl1_mode"
   printf 'drm: selecting mode 3440x1440@165Hz\n' >"$STUB_STATE_DIR/journal"
   : >"$STUB_STATE_DIR/dynamic.log"
@@ -379,13 +380,132 @@ test_precheck_failure_keeps_modes_cfg() {
   cmp_file "modes.cfg content untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
-test_precheck_gamescopectl_empty() {
+
+test_desktop_mode_happy_path() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
+  run_wrapper true
+  eq "Desktop Mode exit code 0" "$RC" 0
+  file_has "Desktop backend detected" "$LOG" "Display backend detected: Desktop/KScreen"
+  file_has "Desktop target reached" "$LOG" "OUTPUT_TARGET_REACHED 1920x1200@60"
+  cmp_file "Desktop mode restored" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  cmp_file "Desktop modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  absent "Desktop state cleared" "$STATE_DIR/state"
+}
+
+test_desktop_mode_without_stream_bypasses() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  unset STUB_STREAM_ACTIVE
+  run_wrapper true
+  eq "Desktop no-stream exit code 0" "$RC" 0
+  file_has "Desktop no-stream bypass logged" "$LOG" "bypassing display pipeline"
+  cmp_file "Desktop no-stream mode untouched" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  file_lacks "Desktop no-stream target not applied" "$STUB_STATE_DIR/kscreen.log" '1920x1200@60'
+}
+
+test_desktop_mode_delayed_stream() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=HDMI-A-1
+  export STUB_KSCREEN_MODE_LIST="2560x1440@144 1920x1080@60"
+  printf '2560x1440@144\n' >"$STUB_STATE_DIR/kscreen_mode"
+  printf 'STREAM_DETECT_WAIT_SECONDS=3\n' >"$CFG"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1080 60.00 FPS'
+  unset STUB_STREAM_ACTIVE
+  export STUB_STREAM_ON_SUBSCRIBE=1
+  run_wrapper true
+  eq "Desktop delayed stream exit code 0" "$RC" 0
+  file_has "Desktop delayed stream detected" "$LOG" "Steam Link streaming session detected"
+  file_has "Desktop delayed target reached" "$LOG" "OUTPUT_TARGET_REACHED 1920x1080@60"
+  cmp_file "Desktop delayed stream restored" "$STUB_STATE_DIR/kscreen_mode" '2560x1440@144'
+}
+
+test_desktop_mode_apply_failure_fails_closed() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3 STUB_KSCREEN_FAIL=1
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
+  run_wrapper true
+  ne "Desktop apply failure returns non-zero" "$RC" 0
+  file_has "Desktop apply failure logged" "$LOG" "Desktop target mode could not be applied or verified"
+  cmp_file "Desktop apply failure leaves original mode" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  file_lacks "Desktop apply failure did not launch game" "$LOG" "GAME_LAUNCH"
+}
+
+test_desktop_mode_isolated_from_gamescope() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-1
+  export STUB_KSCREEN_MODE_LIST="2560x1440@144 1920x1080@60"
+  printf '2560x1440@144\n' >"$STUB_STATE_DIR/kscreen_mode"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1080 60.00 FPS'
+  run_wrapper true
+  eq "Desktop backend does not require gamescope" "$RC" 0
+  file_lacks "Desktop run did not invoke Gamescope dynamic modes" "$STUB_STATE_DIR/dynamic.log" '^1$'
+  file_lacks "Desktop run did not sleep external screen" "$STUB_STATE_DIR/sleep.log" '^1$'
+  cmp_file "Desktop backend restores its own mode" "$STUB_STATE_DIR/kscreen_mode" '2560x1440@144'
+}
+
+test_gamescope_mode_isolated_from_kscreen() {
+  begin
+  # Gamescope is available and the KScreen stub too: the Gamescope path must
+  # never touch KScreen.
+  export STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
+  run_wrapper true
+  eq "Gamescope path runs with KScreen present" "$RC" 0
+  file_has "Gamescope backend selected" "$LOG" "Display backend detected: Gamescope"
+  cmp_file "Gamescope did not drive KScreen" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  absent "Gamescope made no KScreen mode change" "$STUB_STATE_DIR/kscreen.log"
+}
+
+test_desktop_backend_redetected_after_recovery() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  # An interrupted Desktop run left the output at the streamed mode.
+  printf '1920x1200@60\n' >"$STUB_STATE_DIR/kscreen_mode"
+  {
+    printf 'VERSION=1\n'
+    printf 'PHASE=STREAMING\n'
+    printf 'MODES_BACKUP=%s\n' "$BACKUP"
+    printf 'MODES_EXISTED=0\n'
+    printf 'SCREEN_SLEEP_REQUESTED=0\n'
+    printf 'XWAYLAND_SYNCED=0\n'
+    printf 'DISPLAY_BACKEND=desktop\n'
+    printf 'ORIGINAL_CONNECTOR=DP-3\n'
+    printf 'ORIGINAL_MODE=3440x1440@165\n'
+    printf 'ORIGINAL_XWAYLAND_MODE=\n'
+    printf 'DISPLAY_DESCRIPTION=DP-3\n'
+  } >"$STATE_DIR/state"
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  unset STUB_STREAM_ACTIVE
+  run_wrapper true
+  eq "Desktop recovery run exits 0" "$RC" 0
+  file_has "Desktop recovery completed" "$LOG" "Stale-state recovery complete"
+  file_has "Desktop recovery restored the saved mode" "$LOG" "Verified original Desktop mode: 3440x1440@165"
+  cmp_file "Desktop output back to the original mode" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  absent "Desktop recovered state cleared" "$STATE_DIR/state"
+  file_has "backend re-detected after recovery" "$LOG" "Display backend detected: Desktop/KScreen"
+  file_has "bypass after recovery" "$LOG" "bypassing display pipeline"
+}
+
+test_backend_precheck_missing_gamescope_dependency() {
   begin
   export STUB_NO_INFO=1
+  export DISPLAY_BACKEND=gamescope
   run_wrapper true
-  ne "fails when gamescopectl is unreachable" "$RC" 0
-  file_has "unreachable message logged" "$LOG" "not reachable via gamescopectl"
-  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  eq "wrapper bypasses when Gamescope backend is unavailable" "$RC" 0
+  file_has "no backend bypass logged" "$LOG" "No supported display backend detected: bypassing display pipeline"
 }
 
 test_target_repick_refresh() {
@@ -407,7 +527,7 @@ test_bypass_stream_inactive() {
   run_wrapper true
   eq "bypass launches the game" "$RC" 0
   file_has "bypass logged" "$LOG" "bypassing display pipeline"
-  file_has "no gamescope session noted" "$LOG" "STREAM_NO_GAMESCOPE_SESSION"
+  file_has "no display backend bypass noted" "$LOG" "No supported display backend detected: bypassing display pipeline"
   file_lacks "no detection window in Desktop Mode" "$LOG" "STREAM_WAIT_START"
   cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
@@ -444,7 +564,7 @@ test_stream_wait_catches_race() {
   begin
   unset STUB_STREAM_ACTIVE
   printf '%s bazzite steam[1234]: Streaming started to bazzite at 192.0.2.10:39627\n' "$(date '+%b %d %H:%M:%S')" >>"$STUB_STATE_DIR/journal"
-  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  export STUB_STREAM_ON_SUBSCRIBE=1
   printf 'STREAM_DETECT_WAIT_SECONDS=3\n' >"$CFG"
   run_wrapper true
   eq "catches the stream session (launch race)" "$RC" 0
@@ -471,7 +591,7 @@ test_first_stream_no_previous_marker() {
   # Spec §16: no sink, no previous Steam marker anywhere. A new session is
   # created 1s after the wrapper starts and must be caught like any other.
   printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
-  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  export STUB_STREAM_ON_SUBSCRIBE=1
   run_wrapper true
   eq "first connection without marker runs the pipeline" "$RC" 0
   file_has "window opened" "$LOG" "STREAM_WAIT_START"
@@ -496,7 +616,7 @@ test_first_stream_after_crash_leftover() {
   file_has "recovery completed" "$LOG" "Stale-state recovery complete"
   cmp_file "local mode restored after recovery" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   absent "state cleared after recovery" "$STATE_DIR/state"
-  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  export STUB_STREAM_ON_SUBSCRIBE=1
   run_wrapper true
   eq "next connection runs the pipeline" "$RC" 0
   file_has "stream detected" "$LOG" "Steam Link streaming session detected"
@@ -512,7 +632,7 @@ test_stream_sequence() {
     use_steam_log
     steam_hint "$STEAM_STREAM_LOG" 0 'Maximum capture: 1920x1200 60.00 FPS'
     printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
-    ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+    export STUB_STREAM_ON_SUBSCRIBE=1
     run_wrapper true
     eq "connection $i runs the pipeline" "$RC" 0
     file_has "connection $i target reached" "$LOG" "OUTPUT_TARGET_REACHED"
@@ -836,7 +956,7 @@ test_first_connection_hint() {
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
   steam_hint "$STEAM_STREAM_LOG" 0 'Maximum capture: 1920x1200 60.00 FPS'
-  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
+  export STUB_STREAM_ON_SUBSCRIBE=1
   run_wrapper true
   eq "first connection with hint runs the pipeline" "$RC" 0
   file_has "session confirmed" "$LOG" "STREAM_SIGNAL_CONFIRMED"
@@ -1067,12 +1187,16 @@ test_project_structure() {
   # library: one loader plus one directory per responsibility
   exists "library loader" "$PKG_DIR/lib/core/bootstrap.sh"
   exists "host profile module" "$PKG_DIR/lib/display/profile.sh"
+  exists "display backend facade" "$PKG_DIR/lib/display/backend.sh"
+  exists "gamescope display backend" "$PKG_DIR/lib/display/gamescope.sh"
+  exists "desktop display backend" "$PKG_DIR/lib/display/desktop.sh"
   for d in core detection display logging resolution state system xwayland; do
     exists "library area $d" "$PKG_DIR/lib/$d"
   done
   # library files are loaded with source: never executable
   for l in core/bootstrap.sh core/workflow.sh logging/logging.sh detection/steam-link.sh \
-           display/connector.sh display/mode.sh display/profile.sh resolution/resolver.sh \
+           display/connector.sh display/mode.sh display/profile.sh display/backend.sh \
+           display/gamescope.sh display/desktop.sh resolution/resolver.sh \
            xwayland/mode.sh state/state.sh; do
     if [[ -x "$PKG_DIR/lib/$l" ]]; then
       say_fail "library not executable ${l##*/}"
@@ -1100,6 +1224,13 @@ test_project_structure() {
 
 
 TESTS=(
+  desktop_mode_happy_path
+  desktop_mode_without_stream_bypasses
+  desktop_mode_delayed_stream
+  desktop_mode_apply_failure_fails_closed
+  desktop_mode_isolated_from_gamescope
+  gamescope_mode_isolated_from_kscreen
+  desktop_backend_redetected_after_recovery
   happy_path
   config_invalid
   config_invalid_aspect
@@ -1116,7 +1247,6 @@ TESTS=(
   signals
   restore_helper
   precheck_failure_keeps_modes_cfg
-  precheck_gamescopectl_empty
   target_repick_refresh
   bypass_stream_inactive
   bypass_ignores_lock

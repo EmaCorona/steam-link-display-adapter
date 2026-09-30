@@ -163,14 +163,6 @@ steam_link_streaming_active() {
     # No sink and no way to observe one: nothing to detect.
     _sl_have_sink_query_tool || return 1
 
-    # Desktop Mode / no Gamescope session: this pipeline cannot run there and no
-    # window is opened, so the local launch stays immediate (spec §17). The
-    # presence of gamescope tooling is never read as proof of a session (§8).
-    if [[ "${STREAM_DETECT_WINDOW_GAMESCOPE_ONLY:-1}" == 1 ]] && ! _sl_gamescope_session_available; then
-        _sl_event STREAM_NO_GAMESCOPE_SESSION
-        return 1
-    fi
-
     _sl_event STREAM_WAIT_START "${max_wait}s marker=$(_sl_stream_history_marker)"
     log "Steam Link: no session yet; waiting up to ${max_wait}s for a new session"
     if _sl_wait_for_stream_signal "$max_wait"; then

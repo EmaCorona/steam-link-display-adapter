@@ -18,6 +18,7 @@ state_write() {
         printf 'MODES_EXISTED=%s\n' "$MODES_EXISTED"
         printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$SCREEN_SLEEP_REQUESTED"
         printf 'XWAYLAND_SYNCED=%s\n' "$XWAYLAND_SYNCED"
+        printf 'DISPLAY_BACKEND=%s\n' "${DISPLAY_BACKEND:-unknown}"
         printf 'STREAM_MODE=%s\n' "${STREAM_MODE:-auto}"
         printf 'CLIENT_WIDTH=%s\n' "${CLIENT_WIDTH:-}"
         printf 'CLIENT_HEIGHT=%s\n' "${CLIENT_HEIGHT:-}"

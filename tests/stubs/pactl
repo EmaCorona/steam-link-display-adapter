@@ -19,6 +19,13 @@ if [[ "${1:-}" == "subscribe" ]]; then
   # Emulate the PulseAudio/PipeWire event stream: emit a line on every sink
   # state change, then keep listening until killed (the wrapper bounds each
   # listen with `timeout`).
+  #
+  # Deterministic "the session appears while we are listening" (tests only):
+  # create the sink when the subscription starts, so detection never depends on
+  # a sleep race.
+  if [[ "${STUB_STREAM_ON_SUBSCRIBE:-0}" == 1 && ! -f "$SD/stream-on" ]]; then
+    : >"$SD/stream-on"
+  fi
   last=""
   while :; do
     if _sink_present; then cur="present"; else cur="absent"; fi

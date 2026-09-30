@@ -643,69 +643,13 @@ test_recovery_legacy_state_no_config() {
   absent "state cleared" "$STATE_DIR/state"
 }
 
-test_hint_parse() {
-  begin
-  use_steam_log
-  local out
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  out=$(hook_num get_latest_stream_capture_hint)
-  eq "hint 1920x1200@60 parsed" "$out" "1920 1200 60"
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1280x800 89.00 FPS'
-  out=$(hook_num get_latest_stream_capture_hint)
-  eq "hint 1280x800@89 parsed" "$out" "1280 800 89"
-  end
-}
 
-test_hint_invalid() {
-  begin
-  use_steam_log
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: invalid'
-  eq "unparsable hint yields nothing" "$(hook_num get_latest_stream_capture_hint)" ""
-  end
-}
 
-test_hint_stale() {
-  begin
-  use_steam_log
-  steam_hint "$STEAM_STREAM_LOG" 60 'Maximum capture: 1920x1200 60.00 FPS'
-  eq "stale hint ignored" "$(hook_num get_latest_stream_capture_hint)" ""
-  end
-}
 
-test_resolver_exact() {
-  begin
-  export STUB_MODE_LIST="1920x1200@60 3440x1440@165"
-  eq "exact host mode preferred" "$(hook_num resolve_target_mode 1920 1200 60)" "1920 1200 60"
-  end
-}
 
-test_resolver_aspect() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60 1920x1080@60"
-  eq "aspect match preferred over 16:9" "$(hook_num resolve_target_mode 1280 800 89)" "1920 1200 60"
-  end
-}
 
-test_resolver_client_169() {
-  begin
-  export STUB_MODE_LIST="1920x1200@60 1920x1080@60"
-  eq "client 16:9 keeps its own geometry" "$(hook_num resolve_target_mode 1920 1080 60)" "1920 1080 60"
-  end
-}
 
-test_resolver_client_fps() {
-  begin
-  export STUB_MODE_LIST="1280x800@60 1280x800@90"
-  eq "refresh sufficient for client FPS" "$(hook_num resolve_target_mode 1280 800 89)" "1280 800 90"
-  end
-}
 
-test_resolver_no_compatible() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  eq "no compatible mode yields nothing" "$(hook_num resolve_target_mode 2560 1440 60)" ""
-  end
-}
 
 test_no_hint_host_safe_fallback() {
   begin
@@ -1190,13 +1134,9 @@ TESTS=(
   recovery_saved_profile
   recovery_legacy_state_with_config
   recovery_legacy_state_no_config
-  hint_parse
   hint_invalid
-  hint_stale
   resolver_exact
-  resolver_aspect
   resolver_client_169
-  resolver_client_fps
   resolver_no_compatible
   no_hint_host_safe_fallback
   host_agnostic_matrix

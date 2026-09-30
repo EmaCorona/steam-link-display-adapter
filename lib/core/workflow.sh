@@ -255,22 +255,22 @@ recover_stale_state() {
 }
 
 validate_config() {
-    [[ "${STREAM_MODE:-auto}" == auto || "${STREAM_MODE:-auto}" == fixed ]] || fail "STREAM_MODE must be 'auto' or 'fixed'"
-    [[ "$STREAM_WIDTH" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_WIDTH invalid"
-    [[ "$STREAM_HEIGHT" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_HEIGHT invalid"
-    [[ "$STREAM_REFRESH" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_REFRESH invalid"
-    [[ "$STREAM_FPS" =~ ^[1-9][0-9]*$ ]] || fail "STREAM_FPS invalid"
-    [[ "$STREAM_ASPECT" =~ ^[0-9]+:[0-9]+$ ]] || fail "STREAM_ASPECT must be W:H"
+    [[ "${STREAM_MODE:-auto}" == auto || "${STREAM_MODE:-auto}" == fixed ]] || { fail "STREAM_MODE must be 'auto' or 'fixed'"; return 1; }
+    [[ "$STREAM_WIDTH" =~ ^[1-9][0-9]*$ ]] || { fail "STREAM_WIDTH invalid"; return 1; }
+    [[ "$STREAM_HEIGHT" =~ ^[1-9][0-9]*$ ]] || { fail "STREAM_HEIGHT invalid"; return 1; }
+    [[ "$STREAM_REFRESH" =~ ^[1-9][0-9]*$ ]] || { fail "STREAM_REFRESH invalid"; return 1; }
+    [[ "$STREAM_FPS" =~ ^[1-9][0-9]*$ ]] || { fail "STREAM_FPS invalid"; return 1; }
+    [[ "$STREAM_ASPECT" =~ ^[0-9]+:[0-9]+$ ]] || { fail "STREAM_ASPECT must be W:H"; return 1; }
     local asp_w asp_h
     asp_w=${STREAM_ASPECT%%:*}; asp_h=${STREAM_ASPECT##*:}
-    (( STREAM_WIDTH * asp_h == STREAM_HEIGHT * asp_w )) || fail "STREAM_ASPECT must match STREAM_WIDTH:STREAM_HEIGHT"
-    [[ "${STREAM_CAPTURE_HINT_MAX_AGE_SECONDS:-10}" =~ ^[0-9]+$ ]] || fail "STREAM_CAPTURE_HINT_MAX_AGE_SECONDS invalid"
-    [[ "${STREAM_NO_COMPATIBLE_FALLBACK:-auto}" =~ ^(auto|never|always)$ ]] || fail "STREAM_NO_COMPATIBLE_FALLBACK must be auto|never|always"
-    [[ "${STREAM_ASPECT_TOLERANCE:-5}" =~ ^[0-9]+$ ]] || fail "STREAM_ASPECT_TOLERANCE invalid"
-    [[ "$CONNECTOR" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "CONNECTOR invalid"
-    [[ "$MODE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "MODE_TIMEOUT_SECONDS invalid"
-    [[ "$STREAM_XWAYLAND_SERVER_INDEX" =~ ^[0-9]+$ ]] || fail "STREAM_XWAYLAND_SERVER_INDEX invalid"
-    [[ "$STREAM_XWAYLAND_ALLOW_SUPERRES" =~ ^[01]$ ]] || fail "STREAM_XWAYLAND_ALLOW_SUPERRES must be 0 or 1"
+    (( STREAM_WIDTH * asp_h == STREAM_HEIGHT * asp_w )) || { fail "STREAM_ASPECT must match STREAM_WIDTH:STREAM_HEIGHT"; return 1; }
+    [[ "${STREAM_CAPTURE_HINT_MAX_AGE_SECONDS:-10}" =~ ^[0-9]+$ ]] || { fail "STREAM_CAPTURE_HINT_MAX_AGE_SECONDS invalid"; return 1; }
+    [[ "${STREAM_NO_COMPATIBLE_FALLBACK:-auto}" =~ ^(auto|never|always)$ ]] || { fail "STREAM_NO_COMPATIBLE_FALLBACK must be auto|never|always"; return 1; }
+    [[ "${STREAM_ASPECT_TOLERANCE:-5}" =~ ^[0-9]+$ ]] || { fail "STREAM_ASPECT_TOLERANCE invalid"; return 1; }
+    [[ "$CONNECTOR" =~ ^[A-Za-z0-9_.-]+$ ]] || { fail "CONNECTOR invalid"; return 1; }
+    [[ "$MODE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || { fail "MODE_TIMEOUT_SECONDS invalid"; return 1; }
+    [[ "$STREAM_XWAYLAND_SERVER_INDEX" =~ ^[0-9]+$ ]] || { fail "STREAM_XWAYLAND_SERVER_INDEX invalid"; return 1; }
+    [[ "$STREAM_XWAYLAND_ALLOW_SUPERRES" =~ ^[01]$ ]] || { fail "STREAM_XWAYLAND_ALLOW_SUPERRES must be 0 or 1"; return 1; }
 }
 
 resolve_stream_target() {

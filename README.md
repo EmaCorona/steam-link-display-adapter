@@ -1,4 +1,4 @@
-# steam-link-display-adapter
+# Steam Link Display Adapter
 
 > Dynamic display adaptation for Steam Remote Play on Bazzite/Game Mode.
 
@@ -80,7 +80,6 @@ Connector, original mode and the original Xwayland geometry are discovered at ru
 state and used for the restore: the same installation works on different machines with no configuration
 edits.
 
-Details: [`docs/analysis/ANALISI-HOST-DISPLAY-AGNOSTIC.md`](docs/analysis/ANALISI-HOST-DISPLAY-AGNOSTIC.md).
 
 ### Dynamic client resolution
 
@@ -96,7 +95,6 @@ host-compatible target
 
 The resolver weighs aspect ratio, resolution, refresh rate, pixel difference and the client framerate.
 
-Details: [`docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md`](docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md).
 
 ### Race-condition handling
 
@@ -154,7 +152,6 @@ same target geometry
 
 The game is launched only after the synchronization is confirmed.
 
-Details: [`docs/analysis/ANALISI-XWAYLAND-1.md`](docs/analysis/ANALISI-XWAYLAND-1.md).
 
 ### Fail-closed design
 
@@ -207,7 +204,7 @@ cd steam-link-display-adapter
 Then, in Steam → the game → **Properties → Launch Options**:
 
 ```text
-~/.local/bin/steam-link-display-adapter %command%
+/home/USER/.local/bin/steam-link-display-adapter %command%
 ```
 
 Advanced configuration is optional (see [Configuration](#configuration)).
@@ -303,7 +300,6 @@ The Launch Option only activates the adapter: the target is resolved dynamically
 client against the modes the host really advertises. The display target is never chosen from the
 command line.
 
-Details: [`docs/analysis/ANALISI-RIMOZIONE-MODALITA-CLI.md`](docs/analysis/ANALISI-RIMOZIONE-MODALITA-CLI.md).
 
 ## Dynamic resolution
 
@@ -327,7 +323,6 @@ No client hint available
 original host mode (host-safe fallback)
 ```
 
-Details: [`docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md`](docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md).
 
 ## Safety & recovery
 
@@ -410,7 +405,7 @@ lib/       internal library, one area per responsibility
   logging/     log and events
 config/    configuration template
 tests/     test suite and stubs
-docs/      documentation (analysis/, technical/)
+docs/      documentation (technical/)
 ```
 
 Dependency direction: `bin → core → domain modules → system primitives`. Files under `lib/` are not
@@ -419,29 +414,9 @@ executable: they are loaded with `source` through the single loader in `lib/core
 ## Documentation
 
 ```text
-docs/analysis/     the functional analyses the implementation follows
 docs/technical/    implementation details, measurements and deviations
 ```
 
-The analyses are kept byte-identical to the supplied documents.
-
-### Migrating from an older installation
-
-Earlier versions used a different namespace. These paths belong to the **old** installation and are
-neither used nor created by this one:
-
-```text
-~/.config/steamlink-display/             <!-- intentional-legacy -->
-~/.local/state/steamlink-display/        <!-- intentional-legacy -->
-~/.local/bin/steam-link-virtual-display  <!-- intentional-legacy -->
-```
-
-The installer never deletes them automatically. Remove them manually once you are sure no old session is
-still running, then reinstall with `./install.sh`.
-
-Earlier versions also described the host display in the configuration (`CONNECTOR`, `LOCAL_WIDTH`,
-`LOCAL_HEIGHT`, `LOCAL_REFRESH`). That is no longer required: those values are only honoured, when still
-present, to recover a state file written by an older build, and can be deleted.
 
 ## Limitations
 

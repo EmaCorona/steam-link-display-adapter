@@ -1,10 +1,21 @@
-# Steam Link Display Wrapper configuration
+# Steam Link Display Adapter configuration
 # Copy to: ~/.config/steam-link-display-adapter/config
+#
+# Host display geometry is detected automatically: connector, current mode,
+# display description and the original Xwayland #1 geometry are discovered at
+# runtime from Gamescope/DRM. Nothing about the physical monitor is required
+# here (host display agnostic spec, 2026-09-29).
 
-CONNECTOR='DP-3'
+# Connector: 'auto' (default) follows the connector currently selected by
+# Gamescope. A manual value (e.g. 'HDMI-A-1') is an override: it must match
+# the active connector, otherwise the wrapper fails closed without touching
+# the display.
+CONNECTOR='auto'
 
-# Streaming target: Legion Go S (used as fallback when the client hint is not
-# available, and as the fixed target when STREAM_MODE=fixed)
+# Streaming target preference: the fallback used when a valid client hint has
+# no compatible host mode (see STREAM_NO_COMPATIBLE_FALLBACK), and the fixed
+# target when STREAM_MODE=fixed. With STREAM_MODE=auto and no usable client
+# hint, the target is the original host mode, not this value.
 STREAM_WIDTH=1920
 STREAM_HEIGHT=1200
 STREAM_REFRESH=60
@@ -22,10 +33,6 @@ STREAM_CAPTURE_HINT_MAX_AGE_SECONDS=10
 STREAM_NO_COMPATIBLE_FALLBACK='auto'
 # Aspect-ratio compatibility tolerance for the mode resolver, percent.
 STREAM_ASPECT_TOLERANCE=5
-# Refresh alternates accepted for the target resolution: with dynamic modes
-# enabled gamescope re-picks the display's highest refresh right after the
-# switch (observed: 1920x1200@60Hz -> @164Hz).
-STREAM_ALT_REFRESHES='164'
 
 # Xwayland #1 (the game server) does not follow the DRM/output switch: it is
 # synchronized explicitly through GAMESCOPE_XWAYLAND_MODE_CONTROL and verified
@@ -49,11 +56,6 @@ STEAM_STREAM_LOG_PREV="$HOME/.local/share/Steam/logs/streaming_log.previous.txt"
 STREAM_DETECT_WINDOW_SECONDS=180
 STREAM_DETECT_WAIT_SECONDS=5
 
-# Local Gamescope mode
-LOCAL_WIDTH=3440
-LOCAL_HEIGHT=1440
-LOCAL_REFRESH=165
-
 # Timing
 MODE_TIMEOUT_SECONDS=5
 POLL_INTERVAL_SECONDS=0.10
@@ -69,6 +71,11 @@ LOG_FILE="$STATE_DIR/wrapper.log"
 STATE_FILE="$STATE_DIR/state"
 LOCK_FILE="$STATE_DIR/lock"
 MODES_FILE="$HOME/.config/gamescope/modes.cfg"
+
+# Upgrading from an earlier release: CONNECTOR, LOCAL_WIDTH, LOCAL_HEIGHT and
+# LOCAL_REFRESH are no longer used to describe the host display. A state file
+# written by an older build is still recovered using the LOCAL_* values if
+# this file defines them; they can be deleted.
 
 # Per-game override: pass it in the Steam Launch Options instead of editing this
 # file, e.g.  steam-link-display-adapter --mode 1920x1200 %command%

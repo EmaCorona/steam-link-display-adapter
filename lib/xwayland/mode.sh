@@ -125,10 +125,15 @@ wait_for_stream_xwayland_mode() {
 }
 
 restore_stream_xwayland_mode() {
+    # Put Xwayland #1 back to the original host geometry discovered at runtime
+    # (spec §14), passed by the caller: the session capture, the profile saved
+    # in the state file or the legacy configuration for old state files.
+    local want=${1:-}
     local idx="${STREAM_XWAYLAND_SERVER_INDEX:-1}"
-    local want="${LOCAL_WIDTH}x${LOCAL_HEIGHT}" deadline got
+    local deadline got
+    [[ -n "$want" ]] || return 2
     xwayland_display_for_server "$idx" >/dev/null 2>&1 || return 0
-    set_xwayland_server_mode "$idx" "$LOCAL_WIDTH" "$LOCAL_HEIGHT" 0 || return 1
+    set_xwayland_server_mode "$idx" "${want%%x*}" "${want#*x}" 0 || return 1
     deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
     while (( SECONDS <= deadline )); do
         got=$(get_xwayland_server_mode "$idx" 2>/dev/null || true)

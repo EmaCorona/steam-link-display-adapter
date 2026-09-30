@@ -14,10 +14,38 @@
 #     kernel ModeDB of the connector; the exact refresh is enforced by the
 #     post-switch verification (before any screen sleep).
 #   - target verification accepts the display's re-picked refresh for the same
-#     resolution (dynamic modes; observed 1920x1200@60Hz -> @164Hz) via
-#     STREAM_ALT_REFRESHES (default: 164).
+#     resolution (dynamic modes; observed 1920x1200@60Hz -> @164Hz): same
+#     width + same height = same stream geometry, determined dynamically,
+#     never from a configured list (host display agnostic spec §21-§22).
+#   - host mode queries always use the runtime connector (spec §19-§20), never
+#     a hardcoded or statically configured one.
 
 set -Eeuo pipefail
+
+mode_geometry() {
+    # "WxH@R" -> "WxH" ("WxH" unchanged).
+    printf '%s\n' "${1%@*}"
+}
+
+mode_width() {
+    local g
+    g=$(mode_geometry "$1")
+    printf '%s\n' "${g%%x*}"
+}
+
+mode_height() {
+    local g
+    g=$(mode_geometry "$1")
+    printf '%s\n' "${g#*x}"
+}
+
+mode_refresh() {
+    # "WxH@R" -> "R"; empty (exit 0) when no refresh is present.
+    if [[ "$1" == *@* ]]; then
+        printf '%s\n' "${1##*@}"
+    fi
+    return 0
+}
 
 get_gamescope_mode_list() {
     local raw list
@@ -43,7 +71,7 @@ get_host_mode_list() {
             [[ -n "$mode" ]] && { printf '%s\n' "$mode"; found=1; }
         done <"$modes_file"
     fi
-    for f in ${DRM_MODES_GLOB:-/sys/class/drm/card*-${CONNECTOR:-}/modes}; do
+    for f in ${DRM_MODES_GLOB:-$(drm_modes_default_glob)}; do
         [[ -f "$f" ]] || continue
         while IFS= read -r mode; do
             [[ "$mode" =~ ^[0-9]+x[0-9]+$ ]] && { printf '%s\n' "$mode"; found=1; }
@@ -70,9 +98,9 @@ mode_list_contains() {
             [[ "$mode" == "$wanted" ]] && return 0
         done <"$modes_file"
     fi
-    log "mode list: Gamescope X atom unavailable; checking kernel ModeDB for $CONNECTOR"
+    log "mode list: Gamescope X atom unavailable; checking kernel ModeDB for $(host_connector)"
     res=${wanted%@*}
-    for f in ${DRM_MODES_GLOB:-/sys/class/drm/card*-$CONNECTOR/modes}; do
+    for f in ${DRM_MODES_GLOB:-$(drm_modes_default_glob)}; do
         [[ -f "$f" ]] || continue
         if grep -qx -- "$res" "$f"; then
             return 0
@@ -94,27 +122,32 @@ get_current_mode() {
 }
 
 is_target_mode_active() {
-    local current r res
+    local current res tw th cw ch
     res="${TARGET_WIDTH:-$STREAM_WIDTH}x${TARGET_HEIGHT:-$STREAM_HEIGHT}"
     current=$(get_current_mode 2>/dev/null || true)
     [[ -n "$current" ]] || return 1
     if [[ "$current" == "${res}@${TARGET_REFRESH:-$STREAM_REFRESH}" ]]; then
         return 0
     fi
-    # With dynamic external modes enabled, gamescope re-picks the display's
-    # highest refresh for the same resolution right after the switch (observed
-    # on this build: 1920x1200@60Hz -> @164Hz within ~1s). Same resolution =>
-    # same stream geometry; accept the configured alternates.
-    for r in ${STREAM_ALT_REFRESHES:-164}; do
-        if [[ "$current" == "${res}@${r}" ]]; then
-            return 0
-        fi
-    done
-    return 1
+    # The refresh is not a constant: with dynamic external modes enabled
+    # gamescope re-picks the display's refresh for the same resolution right
+    # after the switch (measured 2026-09-29: 1920x1200@60Hz -> @164Hz within
+    # ~1s). The property verified is the stream geometry (spec §22): same
+    # width + same height is accepted, a different resolution never is,
+    # whatever its refresh. The valid refreshes are therefore determined
+    # dynamically from the mode gamescope really selects, with no configured
+    # list (spec §21).
+    tw=${res%%x*}; th=${res#*x}
+    cw=${current%%x*}; ch=${current#*x}; ch=${ch%%@*}
+    [[ "$cw" == "$tw" && "$ch" == "$th" ]]
 }
 
-is_local_mode_active() {
-    local expected="${LOCAL_WIDTH}x${LOCAL_HEIGHT}@${LOCAL_REFRESH}"
+is_original_mode_active() {
+    # True when the DRM mode is the one the display must go back to (spec §13):
+    # the original host mode captured at session start, recovered from the
+    # state file, or passed explicitly by the caller.
+    local expected=${1:-${HOST_ORIGINAL_MODE:-}}
+    [[ -n "$expected" ]] || return 1
     [[ "$(get_current_mode 2>/dev/null || true)" == "$expected" ]]
 }
 
@@ -156,10 +189,12 @@ wait_for_target_mode() {
     return 1
 }
 
-wait_for_local_mode() {
-    local deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
+wait_for_original_mode() {
+    local want=${1:-${HOST_ORIGINAL_MODE:-}} deadline
+    [[ -n "$want" ]] || return 1
+    deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
     while (( SECONDS <= deadline )); do
-        if is_local_mode_active; then
+        if is_original_mode_active "$want"; then
             return 0
         fi
         sleep "$POLL_INTERVAL_SECONDS"

@@ -1,3 +1,9 @@
+> **NOTA (2026-09-29) — superata in parte.** La lista `STREAM_ALT_REFRESHES` e il fallback configurato
+> senza hint sono stati rimossi: la verifica accetta il refresh ripickato per la stessa geometria e, senza
+> hint, il target e' il mode originale dell'host. Vedi
+> [`ANALISI-HOST-DISPLAY-AGNOSTIC.md`](ANALISI-HOST-DISPLAY-AGNOSTIC.md). Il resto del documento resta
+> valido.
+
 # Analisi funzionale — Risoluzione Gamescope dinamica in base al client Steam Link
 
 ## 1. Obiettivo

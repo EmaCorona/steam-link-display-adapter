@@ -3,14 +3,16 @@
 # Launch workflow (orchestration).
 #
 # Coordinates the phases and owns nothing but the order:
-#   recover -> detect -> validate -> resolve -> precheck -> prepare -> run -> cleanup
+#   recover -> detect -> validate -> capture -> resolve -> precheck -> prepare -> run -> cleanup
 # Every concrete interaction with DRM, Xwayland, the state files or the logs is
 # delegated to the domain modules.
 #
 # Steam launch wrapper for Bazzite Game Mode / Gamescope.
-# Default target: 1920x1200 @ 60 Hz, 16:10, 60 FPS streaming (fallback); the
-# stream geometry is resolved dynamically from the Steam Link client hint when
-# STREAM_MODE=auto.
+# Host-agnostic: the physical display (connector, current mode, description and
+# the original Xwayland #1 geometry) is discovered at runtime before any
+# modification; the stream geometry is resolved dynamically from the Steam Link
+# client hint when STREAM_MODE=auto, with a host-safe fallback to the original
+# host mode when the hint is unavailable.
 # History of the applied specs (all implemented, none changed by this refactor):
 #   2026-09-28  display pipeline only while a Steam Link session is active
 #               (steam_link_streaming_active, detection/).
@@ -22,6 +24,9 @@
 #   2026-09-29  "Risoluzione dinamica": the geometry is resolved from the client
 #               capture hint against the advertised host modes (resolution/).
 #   2026-09-29  "Launch Options --mode": per-game override, CLI > config > auto.
+#   2026-09-29  "Host display agnostic": connector/mode/xwayland discovered at
+#               runtime; LOCAL_* are gone and the no-hint fallback is the
+#               original host mode (display/profile.sh).
 #
 # IMPORTANT:
 # - This wrapper is intentionally fail-closed.
@@ -55,6 +60,12 @@ TARGET_REFRESH=''
 TARGET_FPS=''
 TARGET_SOURCE=''
 TARGET_MODE_SPEC=''
+# Runtime host profile (spec §5-§6): discovered before any mutation, persisted
+# in the state file, authoritative for the restore.
+HOST_CONNECTOR=''
+HOST_DESCRIPTION=''
+HOST_ORIGINAL_MODE=''
+HOST_ORIGINAL_XWAYLAND_MODE=''
 
 cleanup() {
     local rc=$?
@@ -90,13 +101,24 @@ cleanup() {
         log "No modes.cfg snapshot owned by this run; leaving modes.cfg untouched"
     fi
 
+    # Original display state for this restore: the profile captured for this
+    # session, the profile saved by the recovered state, or the legacy
+    # configuration for old state files (spec §13-§17). Never guessed.
+    local original_mode original_xwl
+    original_mode=$(original_mode_for_restore)
+    original_xwl=$(original_xwayland_mode_for_restore)
+
     if (( BACKUP_TAKEN || STALE_STATE_LOADED )) && command -v xprop >/dev/null 2>&1 && [[ -n "${GAMESCOPE_DISPLAY:-${DISPLAY:-}}" ]]; then
         if nudge_mode; then
             log "Gamescope local-mode nudge sent"
-            if wait_for_local_mode; then
-                log "Verified local mode: ${LOCAL_WIDTH}x${LOCAL_HEIGHT}@${LOCAL_REFRESH}"
+            if [[ -n "$original_mode" ]]; then
+                if wait_for_original_mode "$original_mode"; then
+                    log "Verified original mode: $original_mode"
+                else
+                    log "CRITICAL: original mode verification timed out"
+                fi
             else
-                log "CRITICAL: local mode verification timed out"
+                log "WARNING: no original mode recorded; skipping mode verification"
             fi
         else
             log "CRITICAL: failed to nudge Gamescope during restore"
@@ -114,15 +136,20 @@ cleanup() {
     # Xwayland #1 does not follow the output switch (measured live in Gaming
     # Mode 2026-09-29: the output change updated only server #0). Whenever this
     # run restored the output -- its own snapshot or a recovered stale state --
-    # bring #1 back to the local geometry too, independently of the
-    # XWAYLAND_SYNCED field: a state written by an older build does not carry it.
+    # bring #1 back to the original host geometry discovered at runtime (spec
+    # §14), independently of the XWAYLAND_SYNCED field: a state written by an
+    # older build does not carry it.
     if (( BACKUP_TAKEN || STALE_STATE_LOADED )); then
         if xwayland_server_present "$STREAM_XWAYLAND_SERVER_INDEX"; then
-            log_event XWAYLAND1_RESTORE "${STREAM_XWAYLAND_SERVER_INDEX}/${LOCAL_WIDTH}/${LOCAL_HEIGHT}"
-            if restore_stream_xwayland_mode; then
-                log "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} restored to ${LOCAL_WIDTH}x${LOCAL_HEIGHT}"
+            log_event XWAYLAND1_RESTORE "${STREAM_XWAYLAND_SERVER_INDEX}/${original_xwl:-unavailable}"
+            if [[ -n "$original_xwl" ]]; then
+                if restore_stream_xwayland_mode "$original_xwl"; then
+                    log "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} restored to ${original_xwl}"
+                else
+                    log "WARNING: could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} geometry"
+                fi
             else
-                log "WARNING: could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} geometry"
+                log "WARNING: no original Xwayland geometry recorded; skipping restore"
             fi
         else
             log "Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} not present; nothing to restore"
@@ -142,7 +169,7 @@ cleanup() {
 }
 
 recover_stale_state() {
-    local previous stale_backup stale_existed stale_synced
+    local previous stale_backup stale_existed stale_synced verify_mode stale_xwl stale_connector
     previous=$(state_phase || true)
     [[ -n "$previous" ]] || return 0
 
@@ -156,6 +183,15 @@ recover_stale_state() {
     [[ -n "$stale_backup" ]] && MODES_BACKUP=$stale_backup
     MODES_EXISTED=${stale_existed:-0}
     XWAYLAND_SYNCED=${stale_synced:-0}
+
+    # The interrupted run's saved host profile is the authoritative restore
+    # reference (spec §16): the current configuration is never used to guess
+    # it. State files written by older builds fall back to the legacy
+    # configuration when it is still present (spec §17).
+    verify_mode=$(original_mode_for_restore)
+    stale_xwl=$(original_xwayland_mode_for_restore)
+    stale_connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
+    log "Saved run profile: connector=${stale_connector:-unknown} mode=${verify_mode:-unavailable} xwayland=${stale_xwl:-unavailable}"
 
     if ! screen_wake; then
         log "ERROR: stale-state recovery could not wake external screen"
@@ -177,9 +213,14 @@ recover_stale_state() {
             log "ERROR: stale-state recovery could not nudge Gamescope"
             return 1
         fi
-        if ! wait_for_local_mode; then
-            log "ERROR: stale-state recovery could not verify local mode"
-            return 1
+        if [[ -n "$verify_mode" ]]; then
+            if ! wait_for_original_mode "$verify_mode"; then
+                log "ERROR: stale-state recovery could not verify the original mode"
+                return 1
+            fi
+            log "Verified original mode: $verify_mode"
+        else
+            log "WARNING: no original mode recorded (state without a saved profile); skipping mode verification"
         fi
     fi
 
@@ -189,13 +230,22 @@ recover_stale_state() {
     fi
 
     if xwayland_server_present "$STREAM_XWAYLAND_SERVER_INDEX"; then
-        if restore_stream_xwayland_mode; then
-            log "Stale-state recovery restored Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} to ${LOCAL_WIDTH}x${LOCAL_HEIGHT}"
+        if [[ -n "$stale_xwl" ]]; then
+            if restore_stream_xwayland_mode "$stale_xwl"; then
+                log "Stale-state recovery restored Xwayland #${STREAM_XWAYLAND_SERVER_INDEX} to ${stale_xwl}"
+            else
+                log "WARNING: stale-state recovery could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX}"
+            fi
         else
-            log "WARNING: stale-state recovery could not restore Xwayland #${STREAM_XWAYLAND_SERVER_INDEX}"
+            log "WARNING: stale-state recovery: no original Xwayland geometry recorded; skipping"
         fi
     fi
     XWAYLAND_SYNCED=0
+
+    # Hand the recovered profile to the rest of the run: a following cleanup
+    # repeats the restore idempotently with the same values.
+    HOST_ORIGINAL_MODE=${verify_mode:-${HOST_ORIGINAL_MODE:-}}
+    HOST_ORIGINAL_XWAYLAND_MODE=${stale_xwl:-${HOST_ORIGINAL_XWAYLAND_MODE:-}}
 
     rm -f -- "$MODES_BACKUP" 2>/dev/null || true
     state_clear
@@ -215,7 +265,7 @@ validate_config() {
     [[ "${STREAM_CAPTURE_HINT_MAX_AGE_SECONDS:-10}" =~ ^[0-9]+$ ]] || fail "STREAM_CAPTURE_HINT_MAX_AGE_SECONDS invalid"
     [[ "${STREAM_NO_COMPATIBLE_FALLBACK:-auto}" =~ ^(auto|never|always)$ ]] || fail "STREAM_NO_COMPATIBLE_FALLBACK must be auto|never|always"
     [[ "${STREAM_ASPECT_TOLERANCE:-5}" =~ ^[0-9]+$ ]] || fail "STREAM_ASPECT_TOLERANCE invalid"
-    [[ -n "$CONNECTOR" ]] || fail "CONNECTOR is empty"
+    [[ "$CONNECTOR" =~ ^[A-Za-z0-9_.-]+$ ]] || fail "CONNECTOR invalid"
     [[ "$MODE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || fail "MODE_TIMEOUT_SECONDS invalid"
     [[ "$STREAM_XWAYLAND_SERVER_INDEX" =~ ^[0-9]+$ ]] || fail "STREAM_XWAYLAND_SERVER_INDEX invalid"
     [[ "$STREAM_XWAYLAND_ALLOW_SUPERRES" =~ ^[01]$ ]] || fail "STREAM_XWAYLAND_ALLOW_SUPERRES must be 0 or 1"
@@ -253,7 +303,9 @@ resolve_stream_target() {
     # Turn the mode source into the runtime target (spec §3, §8-§10, §16, §30).
     # Priority: CLI --mode > global config > auto. Sets CLIENT_*/TARGET_* and
     # logs the source. The configured STREAM_* geometry is only ever the
-    # fallback (or the fixed target); it is never overwritten.
+    # fallback for a valid hint with no compatible host mode, or the fixed
+    # target; it is never overwritten. Without a usable hint, auto uses the
+    # host-safe fallback: the original host mode (spec §26-§27).
     local hint resolved policy
     CLIENT_WIDTH=''; CLIENT_HEIGHT=''; CLIENT_FPS=''
     TARGET_WIDTH=''; TARGET_HEIGHT=''; TARGET_REFRESH=''; TARGET_FPS=''; TARGET_SOURCE=''
@@ -320,16 +372,25 @@ resolve_stream_target() {
         return 1
     fi
 
-    # Hint unavailable or stale: configured fallback (spec §8, §28).
-    TARGET_WIDTH=$STREAM_WIDTH
-    TARGET_HEIGHT=$STREAM_HEIGHT
-    TARGET_REFRESH=$STREAM_REFRESH
-    TARGET_FPS=$STREAM_FPS
-    TARGET_SOURCE=fallback
-    TARGET_MODE_SPEC=fallback
-    log "MODE_SOURCE=fallback"
+    # Hint unavailable or stale: host-safe fallback (spec §26-§27). The target
+    # is the original host mode discovered at session start -- never a value
+    # that assumes a particular client or display. The configured STREAM_*
+    # geometry is not used here: it describes a preference, not the host.
+    if [[ -z "${HOST_ORIGINAL_MODE:-}" ]]; then
+        fail "host profile not captured; refusing to resolve a target (fail-closed)"
+        return 1
+    fi
+    TARGET_WIDTH=$(mode_width "$HOST_ORIGINAL_MODE")
+    TARGET_HEIGHT=$(mode_height "$HOST_ORIGINAL_MODE")
+    TARGET_REFRESH=$(mode_refresh "$HOST_ORIGINAL_MODE")
+    [[ -n "$TARGET_REFRESH" ]] || TARGET_REFRESH=$STREAM_REFRESH
+    TARGET_FPS=$TARGET_REFRESH
+    TARGET_SOURCE=host_original
+    TARGET_MODE_SPEC=$HOST_ORIGINAL_MODE
+    log "Host-safe fallback: client hint unavailable; using the original host mode ${HOST_ORIGINAL_MODE}"
+    log "MODE_SOURCE=host_original"
     log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
-    log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fallback"
+    log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=host_original"
     return 0
 }
 
@@ -342,18 +403,13 @@ precheck() {
 
     [[ -n "${GAMESCOPE_DISPLAY:-${DISPLAY:-}}" ]] || fail "DISPLAY/GAMESCOPE_DISPLAY is not set"
 
-    local actual_connector
-    actual_connector=$(get_connector_name || true)
-    if [[ -z "$actual_connector" ]]; then
-        fail "Gamescope connector not reachable via gamescopectl (is the Gaming Mode session running?)"
-        return 1
-    fi
-    [[ "$actual_connector" == "$CONNECTOR" ]] || {
-        fail "Gamescope connector is '$actual_connector', expected '$CONNECTOR'"
+    # The connector and the manual-override check are resolved during the host
+    # profile discovery, before any mutation (spec §7-§8).
+    [[ -n "${ACTIVE_CONNECTOR:-}" ]] || {
+        fail "the active Gamescope connector was not resolved"
         return 1
     }
-
-    log "Gamescope connector verified: $actual_connector"
+    log "Gamescope connector verified: $ACTIVE_CONNECTOR"
 
     mode_list_contains "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}" || {
         fail "Gamescope does not currently advertise ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
@@ -366,7 +422,10 @@ precheck() {
 prepare_stream_mode() {
     local description current xwayland_current
     log_event OUTPUT_PREPARE_START
-    description=$(get_display_description || true)
+    # The description was captured with the host profile before any mutation;
+    # a fresh read is only a fallback for a momentary gap at capture time.
+    description="${HOST_DESCRIPTION:-}"
+    [[ -n "$description" ]] || description=$(get_display_description || true)
     [[ -n "$description" ]] || {
         fail "unable to determine Gamescope display description"
         return 1
@@ -495,6 +554,8 @@ sl_wrapper_main() {
         log "Steam Link streaming session detected: running display pipeline"
         log_event STREAM_DETECTED
         validate_config
+        # Host profile discovery: before any mutation (spec §10).
+        capture_host_profile || exit 1
         resolve_stream_target || exit 1
         precheck
         prepare_stream_mode

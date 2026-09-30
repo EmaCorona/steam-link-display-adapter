@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# Transient run state: the state file (phase + run metadata) used by the
-# workflow, the cleanup and the stale-state recovery.
+# Transient run state: the state file (phase + run metadata + host profile)
+# used by the workflow, the cleanup and the stale-state recovery. The recovery
+# restores from the profile saved here, not from the current configuration
+# (host display agnostic spec §15-§16).
 
 set -Eeuo pipefail
 
@@ -26,6 +28,10 @@ state_write() {
         printf 'TARGET_FPS=%s\n' "${TARGET_FPS:-}"
         printf 'TARGET_SOURCE=%s\n' "${TARGET_SOURCE:-}"
         printf 'TARGET_MODE_SPEC=%s\n' "${TARGET_MODE_SPEC:-}"
+        printf 'ORIGINAL_CONNECTOR=%s\n' "${HOST_CONNECTOR:-}"
+        printf 'ORIGINAL_MODE=%s\n' "${HOST_ORIGINAL_MODE:-}"
+        printf 'ORIGINAL_XWAYLAND_MODE=%s\n' "${HOST_ORIGINAL_XWAYLAND_MODE:-}"
+        printf 'DISPLAY_DESCRIPTION=%s\n' "${HOST_DESCRIPTION:-}"
     } >"$tmp"
     mv -f -- "$tmp" "$STATE_FILE"
 }

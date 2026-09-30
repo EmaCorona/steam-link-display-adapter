@@ -59,7 +59,7 @@ begin() {
   export STUB_XWL1_DISPLAY=:98
   export STUB_XWL0_DISPLAY=:99
   unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT DRM_MODES_GLOB 2>/dev/null || true
-  unset STREAM_MODE STREAM_CAPTURE_HINT_MAX_AGE_SECONDS STREAM_NO_COMPATIBLE_FALLBACK STREAM_ASPECT_TOLERANCE STEAM_STREAM_LOG STEAM_STREAM_LOG_PREV 2>/dev/null || true
+  unset STREAM_MODE STREAM_CAPTURE_HINT_MAX_AGE_SECONDS STREAM_NO_COMPATIBLE_FALLBACK STREAM_ASPECT_TOLERANCE STEAM_STREAM_LOG STEAM_STREAM_LOG_PREV LOCAL_WIDTH LOCAL_HEIGHT LOCAL_REFRESH STREAM_ALT_REFRESHES 2>/dev/null || true
   export STUB_STREAM_ACTIVE=1
   mkdir -p "$HOME/.config/gamescope" "$XDG_CONFIG_HOME/steam-link-display-adapter" "$XDG_STATE_HOME/steam-link-display-adapter" "$STUB_STATE_DIR"
   STATE_DIR="$XDG_STATE_HOME/steam-link-display-adapter"
@@ -84,11 +84,12 @@ end() { if [[ -n "$SANDBOX" && -d "$SANDBOX" ]]; then rm -rf "$SANDBOX"; fi; SAN
 run_wrapper() { bash "$WRAPPER" "$@" >"$STDOUT" 2>"$STDERR"; RC=$?; }
 
 seed_stale_state() {
+  local omode=${1:-3440x1440@165} oxwl=${2:-3440x1440}
   printf 'StubMake StubModel:1920x1200@60\n' >"$MODESF"
   printf '1920x1200@60\n' >"$STUB_STATE_DIR/mode"
   printf '1920x1200\n' >"$STUB_STATE_DIR/xwl1_mode"
   printf 'drm: selecting mode 1920x1200@60Hz\n' >>"$STUB_STATE_DIR/journal"
-  printf 'StubMake StubModel:3440x1440@165 0\n' >"$BACKUP"
+  printf 'StubMake StubModel:%s 0\n' "$omode" >"$BACKUP"
   {
     printf 'VERSION=1\n'
     printf 'PHASE=STREAMING\n'
@@ -96,6 +97,10 @@ seed_stale_state() {
     printf 'MODES_EXISTED=1\n'
     printf 'SCREEN_SLEEP_REQUESTED=1\n'
     printf 'XWAYLAND_SYNCED=1\n'
+    printf 'ORIGINAL_CONNECTOR=DP-3\n'
+    printf 'ORIGINAL_MODE=%s\n' "$omode"
+    printf 'ORIGINAL_XWAYLAND_MODE=%s\n' "$oxwl"
+    printf 'DISPLAY_DESCRIPTION=StubMake StubModel\n'
   } >"$STATE_DIR/state"
 }
 
@@ -104,6 +109,28 @@ seed_stale_state_old_format() {
   seed_stale_state
   grep -v '^XWAYLAND_SYNCED=' "$STATE_DIR/state" >"$STATE_DIR/state.tmp"
   mv "$STATE_DIR/state.tmp" "$STATE_DIR/state"
+}
+
+# State written by a build that predates the host profile fields: the recovery
+# may still complete via the legacy LOCAL_* configuration (spec §17).
+seed_stale_state_no_profile() {
+  seed_stale_state
+  grep -vE '^(ORIGINAL_|DISPLAY_DESCRIPTION=)' "$STATE_DIR/state" >"$STATE_DIR/state.tmp"
+  mv "$STATE_DIR/state.tmp" "$STATE_DIR/state"
+}
+
+# Parametric host fixture (spec §39): connector, native mode and advertised
+# mode list. Simulates a different physical host without touching the code;
+# the default sandbox is host A (3440x1440@165 on DP-3).
+set_host() {
+  local connector=$1 mode=$2 list=${3:-}
+  [[ -n "$list" ]] || list=$mode
+  export STUB_CONNECTOR="$connector"
+  export STUB_MODE_LIST="$list"
+  printf '%s\n' "$mode" >"$STUB_STATE_DIR/mode"
+  printf 'drm: selecting mode %sHz\n' "$mode" >"$STUB_STATE_DIR/journal"
+  printf '%s\n' "${mode%@*}" >"$STUB_STATE_DIR/xwl1_mode"
+  printf 'StubMake StubModel:%s 0\n' "$mode" >"$MODESF"
 }
 
 # Source the library in a throwaway shell and call one of its functions.
@@ -135,6 +162,8 @@ use_steam_log() {
 
 test_happy_path() {
   begin
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   eq "exit code 0" "$RC" 0
   cmp_file "modes.cfg restored to original" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
@@ -145,7 +174,8 @@ test_happy_path() {
   file_has "xwayland1 sync requested" "$LOG" "XWAYLAND1_SYNC_REQUESTED 1/1920/1200/0"
   file_has "xwayland1 sync confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
   file_has "xwayland1 restored" "$LOG" "Xwayland #1 restored to 3440x1440"
-  file_has "local mode re-verified" "$LOG" "Verified local mode: 3440x1440@165"
+  file_has "original mode re-verified" "$LOG" "Verified original mode: 3440x1440@165"
+  file_has "host profile captured" "$LOG" "HOST_PROFILE_DETECTED connector=DP-3 mode=3440x1440@165 xwayland=3440x1440"
   file_has "warm-up re-poll sent" "$LOG" "Warm-up re-poll sent"
   file_has "game launched" "$LOG" "Launching game:"
   file_has "game launch event" "$LOG" "GAME_LAUNCH"
@@ -179,6 +209,8 @@ test_config_invalid_aspect() {
 test_precheck_mode_missing() {
   begin
   export STUB_MODE_LIST="3440x1440@165"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   ne "fails when target not advertised" "$RC" 0
   file_has "mode error logged" "$LOG" "does not currently advertise 1920x1200@60"
@@ -188,10 +220,13 @@ test_precheck_mode_missing() {
 
 test_precheck_connector_mismatch() {
   begin
+  printf "CONNECTOR='DP-3'\n" >"$CFG"
   export STUB_CONNECTOR=DP-4
   run_wrapper true
   ne "fails on connector mismatch" "$RC" 0
   file_has "connector error logged" "$LOG" "Gamescope connector is 'DP-4', expected 'DP-3'"
+  eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
 test_precheck_kernel_fallback_ok() {
@@ -200,9 +235,11 @@ test_precheck_kernel_fallback_ok() {
   mkdir -p "$SANDBOX/drmsys"
   printf '3440x1440\n1920x1200\n' >"$SANDBOX/drmsys/drm-modes-DP-3"
   export DRM_MODES_GLOB="$SANDBOX/drmsys/drm-modes-*"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   eq "proceeds via kernel ModeDB fallback" "$RC" 0
-  file_has "fallback logged" "$LOG" "checking kernel ModeDB"
+  file_has "fallback logged" "$LOG" "checking kernel ModeDB for DP-3"
 }
 
 test_precheck_kernel_fallback_missing() {
@@ -211,6 +248,8 @@ test_precheck_kernel_fallback_missing() {
   mkdir -p "$SANDBOX/drmsys"
   printf '3440x1440\n1920x1080\n' >"$SANDBOX/drmsys/drm-modes-DP-3"
   export DRM_MODES_GLOB="$SANDBOX/drmsys/drm-modes-*"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   ne "fails when kernel ModeDB lacks the mode" "$RC" 0
   file_has "mode error logged" "$LOG" "does not currently advertise 1920x1200@60"
@@ -219,6 +258,8 @@ test_precheck_kernel_fallback_missing() {
 test_switch_timeout() {
   begin
   export STUB_SET_DIRTY_NOOP=1
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   printf 'MODE_TIMEOUT_SECONDS=1\n' >"$CFG"
   run_wrapper true
   ne "fails when mode never changes" "$RC" 0
@@ -275,6 +316,8 @@ test_stale_state_recovery() {
   run_wrapper true
   eq "recovered and ran" "$RC" 0
   file_has "recovery completed" "$LOG" "Stale-state recovery complete"
+  file_has "saved run profile logged" "$LOG" "Saved run profile: connector=DP-3 mode=3440x1440@165 xwayland=3440x1440"
+  file_has "recovered original mode verified" "$LOG" "Verified original mode: 3440x1440@165"
   cmp_file "modes.cfg = local after run" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   absent "state cleared" "$STATE_DIR/state"
   file_has "wake during recovery" "$STUB_STATE_DIR/sleep.log" '^0$'
@@ -320,6 +363,7 @@ test_restore_helper() {
   file_has "dynamic modes disabled" "$STUB_STATE_DIR/dynamic.log" '^0$'
   file_has "screen wake requested" "$STUB_STATE_DIR/sleep.log" '^0$'
   file_has "xwayland restored by helper" "$STDOUT" "Xwayland #1 geometry restored to 3440x1440"
+  file_has "original mode verified by helper" "$STDOUT" "original mode verified: 3440x1440@165"
   cmp_file "xwayland #1 back to local" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
 }
 
@@ -347,6 +391,8 @@ test_precheck_gamescopectl_empty() {
 test_target_repick_refresh() {
   begin
   export STUB_REPICK_REFRESH=164
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   eq "accepts the gamescope refresh re-pick" "$RC" 0
   file_has "verified with actual refresh" "$LOG" "Verified target mode: 1920x1200@164"
@@ -433,8 +479,8 @@ test_first_stream_no_previous_marker() {
   file_has "session confirmed" "$LOG" "STREAM_SIGNAL_CONFIRMED"
   file_has "session detected" "$LOG" "Steam Link streaming session detected"
   file_lacks "no bypass while the session starts" "$LOG" "bypassing display pipeline"
-  file_has "target mode verified" "$LOG" "Verified target mode: 1920x1200@60"
-  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
+  file_has "target mode verified" "$LOG" "Verified target mode: 3440x1440@165"
+  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 3440x1440"
   cmp_file "modes.cfg restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   cmp_file "xwayland #1 back to local" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
 }
@@ -454,7 +500,7 @@ test_first_stream_after_crash_leftover() {
   run_wrapper true
   eq "next connection runs the pipeline" "$RC" 0
   file_has "stream detected" "$LOG" "Steam Link streaming session detected"
-  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
+  file_has "xwayland1 confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 3440x1440"
   cmp_file "modes.cfg restored again" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
@@ -463,6 +509,8 @@ test_stream_sequence() {
   for i in 1 2 3; do
     begin
     unset STUB_STREAM_ACTIVE
+    use_steam_log
+    steam_hint "$STEAM_STREAM_LOG" 0 'Maximum capture: 1920x1200 60.00 FPS'
     printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
     ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
     run_wrapper true
@@ -478,6 +526,8 @@ test_stream_sequence() {
 
 test_xwayland_sync_order() {
   begin
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   eq "exit 0" "$RC" 0
   # Ordering invariant: target reached -> sync requested -> sync confirmed -> launch.
@@ -499,6 +549,8 @@ test_xwayland_sync_order() {
 test_xwayland_sync_failure_fails_closed() {
   begin
   export STUB_XWL_NOOP=1
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   printf 'MODE_TIMEOUT_SECONDS=1\n' >"$CFG"
   run_wrapper true
   ne "refuses to launch when Xwayland #1 does not follow" "$RC" 0
@@ -512,6 +564,8 @@ test_xwayland_sync_failure_fails_closed() {
 test_xwayland_server_missing_fails_closed() {
   begin
   export STUB_XWL1_ABSENT=1
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   printf 'MODE_TIMEOUT_SECONDS=1\n' >"$CFG"
   run_wrapper true
   ne "refuses to launch when server #1 is missing" "$RC" 0
@@ -541,6 +595,52 @@ test_recovery_old_state_restores_xwayland() {
   eq "recovered then bypassed" "$RC" 0
   file_has "recovery restored xwayland" "$LOG" "Stale-state recovery restored Xwayland #1 to 3440x1440"
   cmp_file "xwayland #1 back to local" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
+}
+
+test_recovery_saved_profile() {
+  local i m
+  local -a M=(3440x1440@165 2560x1440@144)
+  for i in 0 1; do
+    m=${M[$i]}
+    begin
+    unset STUB_STREAM_ACTIVE
+    seed_stale_state "$m" "${m%@*}"
+    run_wrapper true
+    eq "saved profile $((i + 1)) recovered" "$RC" 0
+    file_has "saved value used for verification" "$LOG" "Verified original mode: $m"
+    file_has "saved xwayland restored" "$LOG" "Stale-state recovery restored Xwayland #1 to ${m%@*}"
+    cmp_file "xwayland at saved value" "$STUB_STATE_DIR/xwl1_mode" "${m%@*}"
+    eq "DRM back to the saved mode" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${m}Hz"
+    absent "state cleared" "$STATE_DIR/state"
+    end
+  done
+}
+
+test_recovery_legacy_state_with_config() {
+  begin
+  unset STUB_STREAM_ACTIVE
+  seed_stale_state_no_profile
+  printf 'LOCAL_WIDTH=3440\nLOCAL_HEIGHT=1440\nLOCAL_REFRESH=165\n' >"$CFG"
+  run_wrapper true
+  eq "legacy state recovered via the legacy configuration" "$RC" 0
+  file_has "recovery completed" "$LOG" "Stale-state recovery complete"
+  file_has "legacy value verified" "$LOG" "Verified original mode: 3440x1440@165"
+  file_has "legacy xwayland restored" "$LOG" "Stale-state recovery restored Xwayland #1 to 3440x1440"
+  cmp_file "xwayland at the legacy value" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
+  absent "state cleared" "$STATE_DIR/state"
+}
+
+test_recovery_legacy_state_no_config() {
+  begin
+  unset STUB_STREAM_ACTIVE
+  seed_stale_state_no_profile
+  run_wrapper true
+  eq "legacy recovery completes best-effort" "$RC" 0
+  file_has "recovery completed" "$LOG" "Stale-state recovery complete"
+  file_has "mode skip warned" "$LOG" "no original mode recorded"
+  file_has "xwayland skip warned" "$LOG" "no original Xwayland geometry recorded"
+  cmp_file "modes.cfg restored anyway" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  absent "state cleared" "$STATE_DIR/state"
 }
 
 test_hint_parse() {
@@ -607,15 +707,100 @@ test_resolver_no_compatible() {
   end
 }
 
-test_fallback_no_hint() {
+test_no_hint_host_safe_fallback() {
   begin
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   run_wrapper true
-  eq "runs on fallback" "$RC" 0
+  eq "runs on the host-safe fallback" "$RC" 0
   file_has "hint unavailable" "$LOG" "CLIENT_HINT unavailable"
-  file_has "fallback target" "$LOG" "TARGET_MODE_RESOLVED 1920x1200@60 source=fallback"
-  file_has "target reached" "$LOG" "OUTPUT_TARGET_REACHED 1920x1200@60"
+  file_has "host fallback source" "$LOG" "TARGET_MODE_RESOLVED 3440x1440@165 source=host_original"
+  file_has "host fallback target reached" "$LOG" "OUTPUT_TARGET_REACHED 3440x1440@165"
+  file_lacks "configured client fallback not used" "$LOG" "TARGET_MODE_RESOLVED 1920x1200@60"
+  file_has "original verified" "$LOG" "Verified original mode: 3440x1440@165"
   end
+  begin
+  set_host HDMI-A-1 "2560x1440@144" "2560x1440@144 1920x1080@60"
+  run_wrapper true
+  eq "host B runs on its own original mode" "$RC" 0
+  file_has "host B fallback is its own mode" "$LOG" "TARGET_MODE_RESOLVED 2560x1440@144 source=host_original"
+  eq "host B DRM restored" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode 2560x1440@144Hz"
+  end
+}
+
+test_host_agnostic_matrix() {
+  local i
+  local -a C=(DP-3 HDMI-A-1 DP-1 HDMI-1)
+  local -a H=("3440x1440@165" "2560x1440@144" "3840x2160@120" "1920x1080@60")
+  local -a L=("3440x1440@165 1920x1200@60" "2560x1440@144 1920x1080@60" \
+              "3840x2160@120 1920x1080@60 1920x1200@60" "1920x1080@60")
+  local -a Q=('Maximum capture: 1920x1200 60.00 FPS' 'Maximum capture: 1920x1080 60.00 FPS' \
+              'Maximum capture: 1280x800 60.00 FPS' 'Maximum capture: 1920x1080 60.00 FPS')
+  local -a T=(1920x1200@60 1920x1080@60 1920x1200@60 1920x1080@60)
+  for i in 0 1 2 3; do
+    begin
+    set_host "${C[$i]}" "${H[$i]}" "${L[$i]}"
+    use_steam_log
+    steam_hint "$STEAM_STREAM_LOG" 1 "${Q[$i]}"
+    run_wrapper true
+    eq "host $((i + 1)) runs" "$RC" 0
+    file_has "host $((i + 1)) profile detected" "$LOG" "HOST_PROFILE_DETECTED connector=${C[$i]} mode=${H[$i]}"
+    file_has "host $((i + 1)) target reached" "$LOG" "OUTPUT_TARGET_REACHED ${T[$i]}"
+    eq "host $((i + 1)) original DRM restored" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${H[$i]}Hz"
+    cmp_file "host $((i + 1)) xwayland restored" "$STUB_STATE_DIR/xwl1_mode" "${H[$i]%@*}"
+    cmp_file "host $((i + 1)) modes.cfg restored" "$MODESF" "StubMake StubModel:${H[$i]} 0"
+    end
+  done
+}
+
+test_connector_dynamic() {
+  local out c
+  begin
+  set_host HDMI-A-1 "2560x1440@144" "2560x1440@144 1920x1080@60"
+  unset STUB_MODE_LIST
+  mkdir -p "$SANDBOX/drmsys/card1-HDMI-A-1"
+  printf '2560x1440\n1920x1080\n' >"$SANDBOX/drmsys/card1-HDMI-A-1/modes"
+  export DRM_MODES_GLOB="$SANDBOX/drmsys/card*-HDMI-A-1/modes"
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1080 60.00 FPS'
+  run_wrapper true
+  eq "auto follows the gamescope connector" "$RC" 0
+  file_has "profile uses the runtime connector" "$LOG" "HOST_PROFILE_DETECTED connector=HDMI-A-1 mode=2560x1440@144"
+  file_has "kernel fallback queries the runtime connector" "$LOG" "checking kernel ModeDB for HDMI-A-1"
+  file_has "original restored from the runtime connector" "$LOG" "Verified original mode: 2560x1440@144"
+  eq "runtime connector mode restored" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode 2560x1440@144Hz"
+  for c in DP-3 HDMI-A-1 DP-1; do
+    out=$(env ACTIVE_CONNECTOR="$c" bash -c 'LIB_ROOT="$1"; source "$LIB_ROOT/core/bootstrap.sh"; drm_modes_default_glob' _ "$LIB")
+    eq "default glob uses $c" "$out" "/sys/class/drm/card*-$c/modes"
+  done
+  end
+}
+
+test_refresh_variants() {
+  local r
+  for r in 60 120 144 165 240; do
+    begin
+    set_host DP-2 "2560x1440@$r" "2560x1440@$r 1920x1080@60"
+    use_steam_log
+    steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1080 60.00 FPS'
+    run_wrapper true
+    eq "host at ${r}Hz runs" "$RC" 0
+    file_has "host captured at ${r}Hz" "$LOG" "HOST_PROFILE_DETECTED connector=DP-2 mode=2560x1440@$r"
+    file_has "original verified at ${r}Hz" "$LOG" "Verified original mode: 2560x1440@$r"
+    eq "restore uses the detected ${r}Hz" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode 2560x1440@${r}Hz"
+    end
+  done
+}
+
+test_host_profile_fail_closed() {
+  begin
+  : >"$STUB_STATE_DIR/journal"
+  run_wrapper true
+  ne "fails closed without the original host mode" "$RC" 0
+  file_has "capture failure logged" "$LOG" "unable to determine the current host mode"
+  file_lacks "game not started" "$LOG" "GAME_LAUNCH"
+  eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+  eq "no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
+  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
 test_client_mode_applied() {
@@ -893,8 +1078,8 @@ test_cli_precedence() {
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   run_wrapper true
   eq "auto default with no cli" "$RC" 0
-  file_has "fallback source" "$LOG" "source=fallback"
-  file_has "mode source fallback" "$LOG" "MODE_SOURCE=fallback"
+  file_has "host original source" "$LOG" "source=host_original"
+  file_has "mode source host original" "$LOG" "MODE_SOURCE=host_original"
   end
 }
 
@@ -912,6 +1097,44 @@ test_cli_fixed_across_clients() {
     file_has "client $((i + 1)) cli source" "$LOG" "source=cli"
     file_lacks "client $((i + 1)) hint ignored" "$LOG" "source=steam_capture_hint"
     cmp_file "client $((i + 1)) local restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+    end
+  done
+}
+
+test_fixed_across_hosts() {
+  local i
+  local -a C=(HDMI-A-1 DP-1)
+  local -a H=("2560x1440@144" "3840x2160@120")
+  local -a L=("2560x1440@144 1920x1080@60" "3840x2160@120 1920x1080@60 1920x1200@60")
+  for i in 0 1; do
+    begin
+    set_host "${C[$i]}" "${H[$i]}" "${L[$i]}"
+    use_steam_log
+    steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1280x800 60.00 FPS'
+    printf 'STREAM_MODE=fixed\nSTREAM_WIDTH=1920\nSTREAM_HEIGHT=1080\nSTREAM_REFRESH=60\nSTREAM_ASPECT="16:9"\n' >"$CFG"
+    run_wrapper true
+    eq "fixed on host $((i + 1)) runs" "$RC" 0
+    file_has "fixed target on host $((i + 1))" "$LOG" "TARGET_MODE_RESOLVED 1920x1080@60 source=fixed"
+    file_lacks "hint not read in fixed mode on host $((i + 1))" "$LOG" "CLIENT_HINT"
+    eq "host $((i + 1)) original restored" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${H[$i]}Hz"
+    cmp_file "host $((i + 1)) xwayland restored" "$STUB_STATE_DIR/xwl1_mode" "${H[$i]%@*}"
+    end
+  done
+}
+
+test_cli_across_hosts() {
+  local i
+  local -a C=(DP-3 HDMI-A-1)
+  local -a H=("3440x1440@165" "2560x1440@144")
+  local -a L=("3440x1440@165 1920x1080@60" "2560x1440@144 1920x1080@60")
+  for i in 0 1; do
+    begin
+    set_host "${C[$i]}" "${H[$i]}" "${L[$i]}"
+    run_wrapper --mode 1920x1080 true
+    eq "cli on host $((i + 1)) runs" "$RC" 0
+    file_has "cli target on host $((i + 1))" "$LOG" "TARGET_MODE=1920x1080@60"
+    file_has "cli source on host $((i + 1))" "$LOG" "source=cli"
+    eq "host $((i + 1)) original restored after cli" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${H[$i]}Hz"
     end
   done
 }
@@ -987,6 +1210,10 @@ test_cli_state_persisted() {
   file_has "state TARGET_WIDTH" "$STATE_DIR/state" "TARGET_WIDTH=1920"
   file_has "state TARGET_SOURCE" "$STATE_DIR/state" "TARGET_SOURCE=cli"
   file_has "state TARGET_MODE_SPEC" "$STATE_DIR/state" "TARGET_MODE_SPEC=1920x1200"
+  file_has "state ORIGINAL_CONNECTOR" "$STATE_DIR/state" "ORIGINAL_CONNECTOR=DP-3"
+  file_has "state ORIGINAL_MODE" "$STATE_DIR/state" "ORIGINAL_MODE=3440x1440@165"
+  file_has "state ORIGINAL_XWAYLAND_MODE" "$STATE_DIR/state" "ORIGINAL_XWAYLAND_MODE=3440x1440"
+  file_has "state DISPLAY_DESCRIPTION" "$STATE_DIR/state" "DISPLAY_DESCRIPTION=StubMake StubModel"
   kill -TERM "$wp" 2>/dev/null || true
   wait "$wp" 2>/dev/null || true
   end
@@ -1074,12 +1301,14 @@ test_project_structure() {
   done
   # library: one loader plus one directory per responsibility
   exists "library loader" "$PKG_DIR/lib/core/bootstrap.sh"
+  exists "host profile module" "$PKG_DIR/lib/display/profile.sh"
   for d in core detection display logging resolution state system xwayland; do
     exists "library area $d" "$PKG_DIR/lib/$d"
   done
   # library files are loaded with source: never executable
   for l in core/bootstrap.sh core/workflow.sh logging/logging.sh detection/steam-link.sh \
-           display/mode.sh resolution/resolver.sh xwayland/mode.sh state/state.sh; do
+           display/connector.sh display/mode.sh display/profile.sh resolution/resolver.sh \
+           xwayland/mode.sh state/state.sh; do
     if [[ -x "$PKG_DIR/lib/$l" ]]; then
       say_fail "library not executable ${l##*/}"
     else
@@ -1090,7 +1319,8 @@ test_project_structure() {
   local a
   for a in ANALISI-FUNZIONALE.md ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md \
            ANALISI-RISOLUZIONE-DINAMICA.md ANALISI-XWAYLAND-1.md \
-           ANALISI-CLI-MODE.md ANALISI-RIMOZIONE-FPS-CLI.md; do
+           ANALISI-CLI-MODE.md ANALISI-RIMOZIONE-FPS-CLI.md \
+           ANALISI-HOST-DISPLAY-AGNOSTIC.md; do
     exists "analysis $a" "$PKG_DIR/docs/analysis/$a"
   done
   # no duplicate / stale copies
@@ -1135,6 +1365,9 @@ TESTS=(
   xwayland_server_missing_fails_closed
   recovery_restores_xwayland
   recovery_old_state_restores_xwayland
+  recovery_saved_profile
+  recovery_legacy_state_with_config
+  recovery_legacy_state_no_config
   hint_parse
   hint_invalid
   hint_stale
@@ -1143,7 +1376,11 @@ TESTS=(
   resolver_client_169
   resolver_client_fps
   resolver_no_compatible
-  fallback_no_hint
+  no_hint_host_safe_fallback
+  host_agnostic_matrix
+  connector_dynamic
+  refresh_variants
+  host_profile_fail_closed
   client_mode_applied
   fixed_mode_ignores_hint
   no_compatible_mode_fails_closed
@@ -1162,6 +1399,8 @@ TESTS=(
   cli_argv_preserved
   cli_precedence
   cli_fixed_across_clients
+  fixed_across_hosts
+  cli_across_hosts
   cli_first_connection
   cli_recovery
   cli_bypass_local

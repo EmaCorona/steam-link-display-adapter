@@ -1,8 +1,10 @@
 # steam-link-display-adapter
 
 Wrapper di lancio Steam per **Bazzite Game Mode**: durante il gioco la sessione Gamescope rende la
-geometria del client Steam Link — risolta **dinamicamente** dall'hint del client (fallback **1920×1200
-@ 60 Hz, 16:10**) — con monitor fisico spento, e al termine ripristina **3440×1440 @ 165** e monitor ON.
+geometria del client Steam Link — risolta **dinamicamente** dall'hint del client — con monitor fisico
+spento, e al termine ripristina il **mode originale dell'host** (rilevato a runtime, mai configurato) e
+monitor ON. Il progetto è **host-agnostic**: connettore, mode corrente e geometria Xwayland #1 sono
+scoperti da Gamescope/DRM a ogni sessione.
 
 Implementazione dell'analisi funzionale [`ANALISI-FUNZIONALE.md`](../analysis/ANALISI-FUNZIONALE.md) (copia identica
 del documento fornito, sha256 `bb198ce2cf45267a8da3c4bce27af9f210b42c93111e8e801cab6aca6273b3e2`), con
@@ -25,14 +27,22 @@ base al client** — il target non è più costante, ma risolto dall'hint `Maxim
 mode disponibili sull'host; la configurazione statica resta come fallback e `STREAM_MODE=fixed` ripristina
 il comportamento precedente.
 
+Dal 2026-09-29 implementa inoltre
+[`ANALISI-HOST-DISPLAY-AGNOSTIC.md`](../analysis/ANALISI-HOST-DISPLAY-AGNOSTIC.md) (copia identica del
+documento fornito, sha256 `e0508b3d99b502f91fee0a182d99a5cab5b68cde47f087ec6ff6a8100bfefc6f`):
+**host display agnostic** — connettore, mode originale e geometria Xwayland #1 rilevati a runtime prima
+di ogni modifica (§5-§17); `LOCAL_*` e `STREAM_ALT_REFRESHES` non sono più configurazione; il fallback
+senza hint è il mode originale dell'host (§26-§27); recovery e restore usano il profilo salvato nello
+state file (§15-§17).
+
 ## Installazione e uso (utente, senza root)
 
 ```bash
 ./install.sh
 ```
 
-Installa in `~/.local/bin/` (`steam-link-display-adapter`, `steam-link-display-adapter-hook.sh`,
-`steam-link-display-adapter-verify-environment`, `steam-link-display-adapter-restore`) e crea
+Installa in `~/.local/bin/` (`steam-link-display-adapter`, `steam-link-display-adapter-verify-environment`,
+`steam-link-display-adapter-restore`) e la libreria in `~/.local/lib/steam-link-display-adapter/`; crea
 `~/.config/steam-link-display-adapter/config` se assente.
 
 Launch Option Steam del gioco:
@@ -52,10 +62,10 @@ Comandi diretti:
 - **Steam Link non attivo** (Desktop Mode o Gaming Mode senza streaming): nessuna modifica al display e
   nessun requisito Gamescope/gamescopectl/xprop/xdpyinfo — il wrapper lancia il comando del gioco
   direttamente (passthrough).
-- **Steam Link attivo** (rilevato da `steam_link_streaming_active()` nell'hook, via sink/nodi PipeWire
-  `steam-streaming-playback`): parte la pipeline — Gamescope/connettore → 1920×1200@60 → verifica →
-  **sync Xwayland #1 → verifica root** → sleep monitor → gioco → ripristino completo (3440×1440@165 +
-  Xwayland #1 riportato alla geometria locale).
+- **Steam Link attivo** (rilevato da `steam_link_streaming_active()`, via sink/nodi PipeWire
+  `steam-streaming-playback`): parte la pipeline — profilo host (connettore, mode originale) → target
+  (hint client o mode originale) → verifica → **sync Xwayland #1 → verifica root** → sleep monitor →
+  gioco → ripristino completo (mode originale rilevato + Xwayland #1 alla geometria originale).
 - **Steam Link in avvio** (sink non ancora presente): il rilevamento apre una **finestra bounded
   event-driven** (`pactl subscribe`, con ri-verifica reale dello stato a ogni evento e a ogni scadenza di
   poll, `STREAM_DETECT_WAIT_SECONDS` default 5s) e aggancia la **creazione** del sink. Nessun marker
@@ -164,7 +174,7 @@ scritto nel file di stato per la ricostruzione post-crash (spec §11). Il target
 stream: viene risolto una sola volta prima della preparazione (spec §38).
 
 **Eventi aggiunti** nel `wrapper.log`: `CLIENT_HINT <W>x<H>@<FPS>|unavailable|stale`,
-`TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint|fallback|fixed`,
+`TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint|fallback|fixed|cli|host_original`,
 `TARGET_MODE_NO_COMPATIBLE_HOST_MODE`.
 
 ## Override risoluzione per-gioco: `--mode` (spec 2026-09-29)
@@ -199,6 +209,32 @@ Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
 - Nuove righe di log: `MODE_SOURCE=`, `CLI_MODE=`, `TARGET_MODE=`, eventi `CLI_TARGET_MODE`,
   `TARGET_MODE_UNAVAILABLE`. Stato: `TARGET_MODE_SPEC`.
 
+## Host display agnostic (spec 2026-09-29)
+
+Il progetto non descrive più l'hardware host. Connettore, mode corrente, descrizione del display e
+geometria originale di Xwayland #1 sono **scoperti a runtime prima di ogni modifica**
+(`capture_host_profile()` in `lib/display/profile.sh`) e diventano il riferimento autorevole di prepare e
+restore; evento dedicato: `HOST_PROFILE_DETECTED connector=... mode=... xwayland=...`.
+
+- **Connettore** (§7-§8): `CONNECTOR='auto'` (default) segue il connettore attivo di Gamescope; un
+  override manuale deve coincidere con quello attivo, altrimenti fail-closed prima di toccare il display.
+  Le query mode (`get_host_mode_list`, `mode_list_contains`, kernel ModeDB) usano sempre il connettore
+  runtime: nessuna assunzione su `DP-3` o altri nomi.
+- **Fail-closed** (§10): se il mode corrente non è determinabile prima della prima mutazione, la pipeline
+  si ferma (niente screen sleep, niente sync Xwayland, niente gioco).
+- **Fallback senza hint** (§26-§27): con `STREAM_MODE=auto` e hint assente o stale il target è il **mode
+  originale dell'host**; `STREAM_*` resta la preferenza per `fixed` e per la policy di fallback quando un
+  hint valido non ha mode compatibili.
+- **Refresh del target** (§21-§22): rimossa `STREAM_ALT_REFRESHES`; la verifica accetta il refresh
+  ripickato da Gamescope per la **stessa geometria** (stesso W+H = stessa geometria di stream), mai una
+  risoluzione diversa.
+- **Stato e recovery** (§15-§17): lo state file porta `ORIGINAL_CONNECTOR`, `ORIGINAL_MODE`,
+  `ORIGINAL_XWAYLAND_MODE`, `DISPLAY_DESCRIPTION`; cleanup, recovery e restore helper usano quel profilo,
+  non la configurazione corrente. Stati di build precedenti: fallback legacy sui valori `LOCAL_*` ancora
+  presenti in config; se assenti, skip esplicito con warning (mai mode inventati).
+- **Report** (§31): `verify-environment` mostra `Host display` (connettore, descrizione, mode corrente,
+  Xwayland #1) e `Host modes`.
+
 ## Stato delle verifiche (Definition of Done §38)
 
 | Voce | Stato | Prova |
@@ -209,9 +245,10 @@ Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
 | H4 — description/modes.cfg | fatto | entry scritta/ripristinata correttamente in ogni run (backup = riga originale) |
 | H5 — runtime mode switch | fatto | switch verificato live; ri-pick `@60→@164` accettato (fix); journal `selecting mode` come prova |
 | H6 — screen sleep/wake | fatto | `dpms Off` letto durante i run; wake al cleanup (T1 e run reali) |
+| Host-agnostic (spec 2026-09-29) | fatto (branch) | profilo host runtime, `CONNECTOR=auto`, fallback host-safe, recovery dal profilo salvato; suite parametrizzata su host simulati (connettori, refresh, no-hint); test live da confermare |
 | R1–R5 — acceptance | parziale | run reali: gioco streamato e giocato (23:03, 23:06), uscita pulita + ripristino; resta il pattern di crash sugli avvii "puliti" (vedi sotto) |
 | Sync Xwayland #1 (spec 2026-09-29) | fatto (meccanismo) | probe live 2026-09-29: mapping via `GAMESCOPE_XWAYLAND_SERVER_ID`, `GAMESCOPE_XWAYLAND_MODE_CONTROL` applicata e ripristinata; da confermare in sessione Gaming Mode col client |
-| Unit test | fatto | `tests/run-tests.sh`: **32 test / 237 assert, tutti PASS** (sandbox + stub); comprende hint (parse/invalid/stale), resolver (exact/aspect/16:9/FPS/no-compatible), sequenze multi-client, prima connessione con hint, regressione geometrica (§32-§34 del quarto documento) |
+| Unit test | fatto | `tests/run-tests.sh`: **77 test / 538 assert, tutti PASS** (sandbox + stub); comprende hint (parse/invalid/stale), resolver (exact/aspect/16:9/FPS/no-compatible), sequenze multi-client, prima connessione con hint, regressione geometrica, CLI `--mode`, matrice host simulati (connettori e refresh diversi), fallback host-safe, recovery dal profilo salvato |
 
 ## Test live (2026-09-28 sera, Gaming Mode)
 
@@ -284,9 +321,9 @@ Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
 13. **Cleanup/recovery/restore helper — Xwayland #1.** Il cleanup e il recovery riportano #1 a
     `LOCAL_WIDTHxLOCAL_HEIGHT` (best-effort, con attesa bounded) per non lasciare la geometria di streaming
     in sessione locale; il restore helper manuale legge `XWAYLAND_SYNCED` dallo stato.
-    *Nota (non implementato, non richiesto dal documento):* la modalità locale resta `LOCAL_*` di config
-    (3440×1440@165), non rilevata dinamicamente — §12 la indica come "idealmente", con 3440×1440@165 come
-    default atteso.
+    *Aggiornato 2026-09-29 (host display agnostic):* la modalità locale non è più `LOCAL_*` di config —
+    il mode originale è rilevato a runtime e salvato nello stato; #1 viene riportato a quella geometria
+    (scostamento 21).
 14. **Ripristino di Xwayland #1 non legato al flag (fix dal test live in Gaming Mode, 2026-09-29).**
     Misurato: riportando l'output a 3440x1440@165 gamescope aggiorna solo il server #0, e uno stato scritto
     dalla build precedente non porta `XWAYLAND_SYNCED` → il restore helper lasciava #1 a 1920x1200. Ora il
@@ -322,6 +359,16 @@ Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
     inoltra il resto verbatim; `resolve_cli_target()` risolve il target da CLI (auto/WxH) senza
     leggere il client hint, con fail-closed sui mode non disponibili; nuova chiave di stato
     `TARGET_MODE_SPEC`. Il resolver e il lifecycle restano gli stessi (nessun secondo resolver). 
+21. **Host display agnostic (spec 2026-09-29).** Connettore, mode corrente, descrizione e geometria
+    Xwayland #1 scoperti a runtime prima di ogni modifica (`capture_host_profile()`,
+    `lib/display/profile.sh`; evento `HOST_PROFILE_DETECTED`); `CONNECTOR='auto'` con override manuale
+    verificato (fail-closed su mismatch); query mode sempre sul connettore runtime; rimosse
+    `STREAM_ALT_REFRESHES` (accettazione del refresh ripickato per la stessa geometria) e i default
+    `LOCAL_*`; fallback senza hint = mode originale dell'host; state file con `ORIGINAL_CONNECTOR`/
+    `ORIGINAL_MODE`/`ORIGINAL_XWAYLAND_MODE`/`DISPLAY_DESCRIPTION`; recovery dal profilo salvato, con
+    fallback legacy `LOCAL_*` per gli stati di build precedenti e skip esplicito se assenti; report con
+    sezione Host display / Host modes.
+
 ## Valutazione watcher `systemd --user` (spec §9/§10/§24 terza correzione)
 
 La spec chiede di **valutare** un watcher persistente event-driven per eliminare ogni attesa nel gioco
@@ -357,7 +404,8 @@ Richiede una finestra in Gaming Mode con l'utente presente:
    journal (`drm: selecting mode <target>Hz`);
 3. lato Steam: `~/.local/share/Steam/logs/streaming_log.txt` → `setting capture size <target>` e
    `CLIENT: Video rect: <target> at 0,0` coerenti con il target risolto;
-4. uscire dal gioco → monitor ON, `3440x1440@165`, `wrapper.log` con "Verified local mode", stato pulito;
+4. uscire dal gioco → monitor ON, mode originale ripristinato, `wrapper.log` con "Verified original mode",
+   stato pulito;
 5. ripetere con un secondo client di geometria diversa (target ricalcolato) e per R3 (SIGTERM/SIGINT/SIGHUP)
    e stale-state sul campo.
 
@@ -377,7 +425,7 @@ caricamento dei moduli e l'invocazione dell'orchestrazione.
 |---|---|
 | `lib/core/` | orchestrazione (`workflow.sh`, `restore.sh`, `report.sh`), CLI (`cli.sh`), default (`config.sh`), loader (`bootstrap.sh`) |
 | `lib/detection/` | `steam-link.sh` (sessione Steam Link, hint client), `gamescope.sh` (sessione Gamescope, atomi X) — sola lettura |
-| `lib/display/` | `connector.sh` (identità connettore/display), `mode.sh` (mode correnti/disponibili, switch, verifica, sleep/wake) |
+| `lib/display/` | `connector.sh` (identità connettore/display, connettore runtime), `profile.sh` (profilo host: discovery, fallback legacy), `mode.sh` (mode correnti/disponibili, switch, verifica, sleep/wake) |
 | `lib/resolution/` | `resolver.sh`: decide **quale** mode usare (il display lo applica) |
 | `lib/xwayland/` | `mode.sh`: discovery server, apply/verify, sincronizzazione #1 |
 | `lib/state/` | `state.sh` (file di stato), `snapshot.sh` (backup/saved mode di modes.cfg), `lock.sh` |

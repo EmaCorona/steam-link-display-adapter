@@ -4,23 +4,27 @@
 
 Steam Link can request a different resolution and aspect ratio than the host's physical display.
 
+The adapter is **host-agnostic**: the active Gamescope display, its current mode and its available
+modes are discovered **at runtime**. The host display does not need to be configured. The client
+resolution comes from Steam Remote Play; the host resolution comes from Gamescope/DRM.
+
 This wrapper temporarily adapts Gamescope to the Steam Link client's resolution, synchronizes Xwayland
-and restores the original state when the session ends.
+and restores the original host state when the session ends.
 
 **No root, no changes to Steam, Proton, Wine or DXVK/VKD3D: it is a per-game Launch Option.**
 
 ## What it solves
 
-A host with an ultrawide monitor serving a handheld is the typical case:
+A host whose display geometry differs from the client's is the typical case:
 
 ```text
-Host display
-    3440×1440 / 21:9
+Host display (any)
+    whatever the display advertises
 
         ↓
 
 Steam Link client
-    1920×1200 / 16:10
+    requested resolution / aspect
 
         ↓
 
@@ -34,7 +38,7 @@ steam-link-display-adapter
         ↓
 
 temporary host adaptation
-    1920×1200 / 16:10
+    client geometry at a host-compatible mode
 
         ↓
 
@@ -44,13 +48,39 @@ Steam capture
         ↓
 
 session ends
-    original state restored
+    original host state restored
 ```
+
+The same flow works with any host — for example a `3440×1440` ultrawide, a `2560×1440` or a `3840×2160`
+panel — without editing the configuration: connector, current mode and available modes are discovered
+at runtime.
 
 You do not need to know what Gamescope, Xwayland, DRM or PipeWire are to use it: those details live in
 [`docs/`](docs/).
 
 ## Highlights
+
+### Host-agnostic display
+
+The host display is never configured manually and never assumed:
+
+```text
+Gamescope / DRM
+    connector
+    current mode
+    display description
+    available modes
+        ↓
+host capabilities
+        ↓
+runtime target
+```
+
+Connector, original mode and the original Xwayland geometry are discovered at runtime, saved in the run
+state and used for the restore: the same installation works on different machines with no configuration
+edits.
+
+Details: [`docs/analysis/ANALISI-HOST-DISPLAY-AGNOSTIC.md`](docs/analysis/ANALISI-HOST-DISPLAY-AGNOSTIC.md).
 
 ### Dynamic client resolution
 
@@ -96,6 +126,8 @@ RECOVER
 DETECT
    ↓
 VALIDATE
+   ↓
+HOST PROFILE
    ↓
 RESOLVE
    ↓
@@ -144,7 +176,7 @@ previous run interrupted
         ↓
 stale state detected
         ↓
-conservative recovery
+conservative recovery (saved host profile)
         ↓
 normal execution
 ```
@@ -202,11 +234,12 @@ pactl / pw-cli
 flock
 ```
 
-The target mode must exist in the kernel ModeDB of the connector (for example `video=DP-3:1920x1200@60`
-on the kernel command line). Read-only check:
+The target mode must exist in the mode set of the active connector (for example `video=DP-1:1920x1080@60`
+on the kernel command line). Read-only check — replace the connector with the one reported by
+`steam-link-display-adapter-verify-environment`:
 
 ```bash
-cat /sys/class/drm/card*-DP-3/modes
+cat /sys/class/drm/card*-HDMI-A-1/modes
 ```
 
 ## How it works
@@ -216,6 +249,9 @@ Steam Link client
         │
         ▼
 Session detection
+        │
+        ▼
+Host profile discovery
         │
         ▼
 Client capture hint
@@ -283,23 +319,24 @@ Details: [`docs/analysis/ANALISI-CLI-MODE.md`](docs/analysis/ANALISI-CLI-MODE.md
 
 ## Dynamic resolution
 
-The target is recomputed for every session:
+The target is recomputed for every session against the modes the host really advertises:
 
 ```text
-Client A
-1920×1200
+Client A (16:10) on a 3440×1440 host
    ↓
 1920×1200 target
 
-Client B
-1920×1080
+Client B (16:9) on a 2560×1440 host
    ↓
 1920×1080 target
 
-Client C
-1280×800
+Client C (16:10) on a 3840×2160 host
    ↓
-best compatible host mode
+best compatible 16:10 host mode
+
+No client hint available
+   ↓
+original host mode (host-safe fallback)
 ```
 
 Details: [`docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md`](docs/analysis/ANALISI-RISOLUZIONE-DINAMICA.md).
@@ -320,9 +357,12 @@ Sleep display
 Launch game
 ```
 
-The fundamental rule:
+The fundamental rules:
 
 ```text
+No original host profile captured
+→ no display modification
+
 No verified target
 → no display modification
 → no game launch
@@ -339,15 +379,15 @@ Interrupted session
 ## Configuration
 
 ```bash
+CONNECTOR='auto'
 STREAM_MODE='auto'
-
-STREAM_WIDTH=1920
-STREAM_HEIGHT=1200
-STREAM_REFRESH=60
-STREAM_FPS=60
 ```
 
-`STREAM_*` values are used as fallback / fixed mode configuration.
+The host display does not need to be configured: connector, current mode and the original Xwayland
+geometry are detected at runtime. `CONNECTOR='auto'` follows the connector selected by Gamescope; a
+manual override (for example `'HDMI-A-1'`) is verified against the active connector, otherwise the
+wrapper fails closed without touching the display. `STREAM_*` values (fallback / fixed) are optional
+preferences.
 
 The complete list of options is in
 [`config/steam-link-display-adapter.conf.example`](config/steam-link-display-adapter.conf.example).
@@ -374,7 +414,7 @@ bin/       entrypoints (public commands): paths, module loading, invocation
 lib/       internal library, one area per responsibility
   core/        orchestration (workflow, CLI, configuration, loader)
   detection/   environment state (Steam Link session, Gamescope)
-  display/     connector/display identity and DRM modes
+  display/     connector identity, host profile and DRM modes
   resolution/  which mode to use (resolver)
   xwayland/    Xwayland #1 server
   state/       run state, modes.cfg snapshot, lock
@@ -411,6 +451,10 @@ neither used nor created by this one:
 The installer never deletes them automatically. Remove them manually once you are sure no old session is
 still running, then reinstall with `./install.sh`.
 
+Earlier versions also described the host display in the configuration (`CONNECTOR`, `LOCAL_WIDTH`,
+`LOCAL_HEIGHT`, `LOCAL_REFRESH`). That is no longer required: those values are only honoured, when still
+present, to recover a state file written by an older build, and can be deleted.
+
 ## Limitations
 
 - Detection is bounded (default 5 s window). In Desktop Mode the launch stays immediate; in Game Mode
@@ -418,7 +462,10 @@ still running, then reinstall with `./install.sh`.
 - The client hint is read once, before preparing the session, and only if it is recent (default 10 s):
   the target does not change while a stream is already running.
 - If the client mode does not exist on the host, the resolver picks an aspect-compatible mode (or the
-  configured fallback), never an arbitrary one.
+  configured fallback), never an arbitrary one: the target resolution must be supported by the host's
+  Gamescope/DRM mode set, or a compatible host mode must exist.
+- Without a usable client hint, `auto` targets the original host mode (host-safe fallback) instead of a
+  configured value.
 - No cleanup after `SIGKILL`, panic or power loss: the leftover state is recovered at the next launch.
 - The UI stream alone (Big Picture before the game starts) is not switched; the wrapper acts from the
   game launch.

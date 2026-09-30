@@ -174,40 +174,28 @@ scritto nel file di stato per la ricostruzione post-crash (spec §11). Il target
 stream: viene risolto una sola volta prima della preparazione (spec §38).
 
 **Eventi aggiunti** nel `wrapper.log`: `CLIENT_HINT <W>x<H>@<FPS>|unavailable|stale`,
-`TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint|fallback|fixed|cli|host_original`,
+`TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint|fallback|fixed|host_original`,
 `TARGET_MODE_NO_COMPATIBLE_HOST_MODE`.
 
-## Override risoluzione per-gioco: `--mode` (spec 2026-09-29)
+## Rimozione modalita' CLI `--mode` (spec 2026-09-30)
 
-Estensione non invasiva del layer di input del target
-([`ANALISI-CLI-MODE.md`](../analysis/ANALISI-CLI-MODE.md), sha256
-`de4570646a6a0b58d723c4f8abe29acfaa05257410c18fe71cf24fe170796692`): le Steam Launch Options possono
-forzare il target per il singolo gioco. Non tocca rilevamento, prima connessione, resolver, Xwayland #1,
-cleanup, recovery.
+Superato e **rimosso**: l'override per-gioco descritto in
+[`ANALISI-CLI-MODE.md`](../analysis/ANALISI-CLI-MODE.md) non esiste piu'. L'unica Launch Option
+pubblica e' `steam-link-display-adapter %command%`; la CLI non seleziona piu' il target. La
+specifica vigente e' [`ANALISI-RIMOZIONE-MODALITA-CLI.md`](../analysis/ANALISI-RIMOZIONE-MODALITA-CLI.md)
+(copia identica del documento fornito).
 
-Contratto: `--mode auto | WxH`. Solo i parametri **prima** del comando del gioco sono consumati;
-il resto e' inoltrato verbatim (`GAME_ARGS`). Valori non validi, `--mode` duplicato, opzione sconosciuta o
-`--mode` senza valore -> uscita non-zero **prima** di qualsiasi modifica (nessun tocco a output, modes.cfg,
-Xwayland, monitor o stato). `--help` stampa l'uso senza effetti.
-
-Priorita' (spec §3): `--mode` > `STREAM_MODE` globale > `auto`.
-
-| Sorgente | WIDTH/HEIGHT | REFRESH | TARGET_SOURCE | MODE_SOURCE |
-|---|---|---|---|---|
-| `--mode auto` | dal client hint | dal resolver | `steam_capture_hint` | `auto` |
-| `--mode WxH` | forzati | dal resolver (solo geometria) | `cli` | `cli` |
-| `STREAM_MODE=fixed` (no CLI) | `STREAM_*` | `STREAM_REFRESH` | `fixed` | `config` |
-| fallback (auto, hint assente) | `STREAM_*` | `STREAM_REFRESH` | `fallback` | `fallback` |
-
-- `WxH` e' un vincolo **duro** sulla geometria: il resolver sceglie solo il refresh; se la geometria non e'
-  disponibile -> `TARGET_MODE_UNAVAILABLE` + fail-closed.
-- Il refresh **non** e' specificabile dalla CLI: `--mode WxH@FPS` e' **invalido** e viene rifiutato prima
-  di qualsiasi modifica (spec 2026-09-29). `TARGET_MODE_SPEC` vale quindi `WxH`, mentre `TARGET_REFRESH`
-  porta il refresh scelto dal resolver; la distinzione richiesta utente / mode applicato resta visibile nei log.
-- Il client hint **non** viene letto nelle modalita' CLI (spec §23); il target resta immutabile durante lo
-  stream.
-- Nuove righe di log: `MODE_SOURCE=`, `CLI_MODE=`, `TARGET_MODE=`, eventi `CLI_TARGET_MODE`,
-  `TARGET_MODE_UNAVAILABLE`. Stato: `TARGET_MODE_SPEC`.
+- Parser (`lib/core/cli.sh`): consuma solo `--help` davanti al comando del gioco, inoltra il resto
+  verbatim (`GAME_ARGS`). Qualsiasi forma di `--mode` (`--mode auto`, `--mode WxH`, `--mode=WxH`)
+  e' un parametro **non supportato** -> uscita non-zero **prima** di qualsiasi modifica (nessun tocco
+  a output, modes.cfg, Xwayland, monitor o stato). `--help` resta read-only.
+- Rimosse le variabili CLI-only (`MODE_SOURCE`, `MODE_SPEC`, `CLI_WIDTH`, `CLI_HEIGHT`) e la funzione
+  `resolve_cli_target()`; `resolve_stream_target()` segue direttamente il comportamento standard.
+- `source=cli` non esiste piu': le sorgenti restano `steam_capture_hint`, `fixed`, `fallback`,
+  `host_original`, con semantica invariata.
+- `STREAM_MODE` resta invariato (`auto`/`fixed`): e' configurazione interna, non una modalita' CLI.
+- Il motore di risoluzione (`resolve_target_mode`), rilevamento, Xwayland #1, cleanup, recovery e
+  screen sleep/wake restano invariati.
 
 ## Host display agnostic (spec 2026-09-29)
 
@@ -248,7 +236,7 @@ restore; evento dedicato: `HOST_PROFILE_DETECTED connector=... mode=... xwayland
 | Host-agnostic (spec 2026-09-29) | fatto (branch) | profilo host runtime, `CONNECTOR=auto`, fallback host-safe, recovery dal profilo salvato; suite parametrizzata su host simulati (connettori, refresh, no-hint); test live da confermare |
 | R1–R5 — acceptance | parziale | run reali: gioco streamato e giocato (23:03, 23:06), uscita pulita + ripristino; resta il pattern di crash sugli avvii "puliti" (vedi sotto) |
 | Sync Xwayland #1 (spec 2026-09-29) | fatto (meccanismo) | probe live 2026-09-29: mapping via `GAMESCOPE_XWAYLAND_SERVER_ID`, `GAMESCOPE_XWAYLAND_MODE_CONTROL` applicata e ripristinata; da confermare in sessione Gaming Mode col client |
-| Unit test | fatto | `tests/run-tests.sh`: **77 test / 538 assert, tutti PASS** (sandbox + stub); comprende hint (parse/invalid/stale), resolver (exact/aspect/16:9/FPS/no-compatible), sequenze multi-client, prima connessione con hint, regressione geometrica, CLI `--mode`, matrice host simulati (connettori e refresh diversi), fallback host-safe, recovery dal profilo salvato |
+| Unit test | fatto | `tests/run-tests.sh`: **66 test / 482 assert, tutti PASS** (sandbox + stub); comprende hint (parse/invalid/stale), resolver (exact/aspect/16:9/FPS/no-compatible), sequenze multi-client, prima connessione con hint, regressione geometrica, rifiuto delle vecchie opzioni `--mode`, preservazione argv, help minimale, matrice host simulati (connettori e refresh diversi), fallback host-safe, recovery dal profilo salvato |
 
 ## Test live (2026-09-28 sera, Gaming Mode)
 
@@ -354,11 +342,12 @@ restore; evento dedicato: `HOST_PROFILE_DETECTED connector=... mode=... xwayland
     `STREAM_WIDTH:STREAM_HEIGHT`) perché `fixed` possa cambiare geometria. Il file di stato porta
     `CLIENT_*`/`TARGET_*`/`STREAM_MODE`; il cleanup azzera il target client (cache valida solo per la sessione
     corrente, spec §28).
-20. **Wrapper — override `--mode` per-gioco (spec 2026-09-29).** Parser esplicito prima di qualsiasi azione
-    (`parse_wrapper_args`/`parse_mode_value`): consuma `--mode`/`--help` davanti al comando del gioco e
-    inoltra il resto verbatim; `resolve_cli_target()` risolve il target da CLI (auto/WxH) senza
-    leggere il client hint, con fail-closed sui mode non disponibili; nuova chiave di stato
-    `TARGET_MODE_SPEC`. Il resolver e il lifecycle restano gli stessi (nessun secondo resolver). 
+20. **Wrapper — rimozione modalita' CLI `--mode` (spec 2026-09-30).** Il parser
+    (`parse_wrapper_args`) consuma solo `--help` davanti al comando del gioco e inoltra il resto
+    verbatim; ogni forma di `--mode` e' un parametro non supportato e fa uscire non-zero prima di
+    qualsiasi modifica. Rimosse le variabili CLI-only (`MODE_SOURCE`/`MODE_SPEC`/`CLI_WIDTH`/
+    `CLI_HEIGHT`) e `resolve_cli_target()`; `resolve_stream_target()` segue direttamente il comportamento
+    standard (`STREAM_MODE`/hint/fallback host-safe). Il resolver e il lifecycle restano gli stessi.
 21. **Host display agnostic (spec 2026-09-29).** Connettore, mode corrente, descrizione e geometria
     Xwayland #1 scoperti a runtime prima di ogni modifica (`capture_host_profile()`,
     `lib/display/profile.sh`; evento `HOST_PROFILE_DETECTED`); `CONNECTOR='auto'` con override manuale

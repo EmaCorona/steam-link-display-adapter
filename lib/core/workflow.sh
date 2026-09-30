@@ -23,7 +23,9 @@
 #               no historical marker required (detection/steam-link.sh).
 #   2026-09-29  "Risoluzione dinamica": the geometry is resolved from the client
 #               capture hint against the advertised host modes (resolution/).
-#   2026-09-29  "Launch Options --mode": per-game override, CLI > config > auto.
+#   2026-09-30  "Rimozione modalita' CLI --mode": the per-game --mode override
+#               is removed; the only public Launch Option is `%command%` and the
+#               target is always resolved by the standard behaviour below.
 #   2026-09-29  "Host display agnostic": connector/mode/xwayland discovered at
 #               runtime; LOCAL_* are gone and the no-hint fallback is the
 #               original host mode (display/profile.sh).
@@ -271,74 +273,35 @@ validate_config() {
     [[ "$STREAM_XWAYLAND_ALLOW_SUPERRES" =~ ^[01]$ ]] || fail "STREAM_XWAYLAND_ALLOW_SUPERRES must be 0 or 1"
 }
 
-resolve_cli_target() {
-    # --mode WxH: the CLI fixes only the geometry; the shared resolver picks a
-    # compatible refresh. Never uses the configured STREAM_* geometry, and a
-    # requested resolution that is unavailable fails closed without
-    # substitution.
-    TARGET_SOURCE=cli
-    TARGET_MODE_SPEC=$MODE_SPEC
-    local resolved rw rh rr
-    TARGET_WIDTH=$CLI_WIDTH
-    TARGET_HEIGHT=$CLI_HEIGHT
-    if ! resolved=$(resolve_target_mode "$CLI_WIDTH" "$CLI_HEIGHT" 0); then
-        log_event TARGET_MODE_UNAVAILABLE "${CLI_WIDTH}x${CLI_HEIGHT}"
-        fail "requested resolution ${CLI_WIDTH}x${CLI_HEIGHT} is not available (fail-closed)"
-        return 1
-    fi
-    read -r rw rh rr <<<"$resolved" || true
-    if [[ "$rw" != "$CLI_WIDTH" || "$rh" != "$CLI_HEIGHT" ]]; then
-        # The resolver may return a merely aspect-compatible mode; a CLI
-        # resolution is a hard constraint, so this is an unavailable mode.
-        log_event TARGET_MODE_UNAVAILABLE "${CLI_WIDTH}x${CLI_HEIGHT}"
-        fail "requested resolution ${CLI_WIDTH}x${CLI_HEIGHT} is not available (fail-closed)"
-        return 1
-    fi
-    TARGET_REFRESH=${rr:-$STREAM_REFRESH}
-    TARGET_FPS=$STREAM_FPS
-    log_event CLI_TARGET_MODE "${TARGET_WIDTH}x${TARGET_HEIGHT}"
-}
-
 resolve_stream_target() {
     # Turn the mode source into the runtime target (spec §3, §8-§10, §16, §30).
-    # Priority: CLI --mode > global config > auto. Sets CLIENT_*/TARGET_* and
-    # logs the source. The configured STREAM_* geometry is only ever the
-    # fallback for a valid hint with no compatible host mode, or the fixed
-    # target; it is never overwritten. Without a usable hint, auto uses the
-    # host-safe fallback: the original host mode (spec §26-§27).
+    # The only entry point is the standard behaviour: STREAM_MODE=fixed uses the
+    # configured geometry, otherwise the target comes from the client capture
+    # hint resolved against the host modes. Sets CLIENT_*/TARGET_*. The
+    # configured STREAM_* geometry is only ever the fallback for a valid hint
+    # with no compatible host mode, or the fixed target; it is never
+    # overwritten. Without a usable hint, auto uses the host-safe fallback: the
+    # original host mode (spec §26-§27).
     local hint resolved policy
     CLIENT_WIDTH=''; CLIENT_HEIGHT=''; CLIENT_FPS=''
     TARGET_WIDTH=''; TARGET_HEIGHT=''; TARGET_REFRESH=''; TARGET_FPS=''; TARGET_SOURCE=''
     TARGET_MODE_SPEC=''
 
-    # CLI override from the Steam Launch Options wins over the global config.
-    if [[ "${MODE_SOURCE:-}" == cli ]]; then
-        resolve_cli_target || return 1
-        log "MODE_SOURCE=cli"
-        log "CLI_MODE=${MODE_SPEC:-}"
-        log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
-        log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=cli"
-        return 0
-    fi
-
-    if [[ "${MODE_SOURCE:-}" == auto ]]; then
-        log "MODE_SOURCE=auto"
-    elif [[ "${STREAM_MODE:-auto}" == fixed ]]; then
-        # Global config fixed (no CLI): equivalent to the previous behaviour and
-        # the rollback path; the client hint is not read at all (spec §30).
+    if [[ "${STREAM_MODE:-auto}" == fixed ]]; then
+        # Global config fixed: the constant behaviour and the rollback path;
+        # the client hint is not read at all (spec §30).
         TARGET_WIDTH=$STREAM_WIDTH
         TARGET_HEIGHT=$STREAM_HEIGHT
         TARGET_REFRESH=$STREAM_REFRESH
         TARGET_FPS=$STREAM_FPS
         TARGET_SOURCE=fixed
         TARGET_MODE_SPEC="${STREAM_WIDTH}x${STREAM_HEIGHT}@${STREAM_REFRESH}"
-        log "MODE_SOURCE=config"
         log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
         log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fixed"
         return 0
     fi
 
-    # Dynamic path (no CLI, or explicit --mode auto).
+    # Dynamic path (STREAM_MODE=auto, the default).
     if hint=$(get_latest_stream_capture_hint); then
         read -r CLIENT_WIDTH CLIENT_HEIGHT CLIENT_FPS <<<"$hint" || true
         if resolved=$(resolve_target_mode "$CLIENT_WIDTH" "$CLIENT_HEIGHT" "$CLIENT_FPS"); then
@@ -348,7 +311,6 @@ resolve_stream_target() {
             TARGET_SOURCE=steam_capture_hint
             TARGET_MODE_SPEC=auto
             log "Client hint ${CLIENT_WIDTH}x${CLIENT_HEIGHT}@${CLIENT_FPS} -> target ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
-            [[ "${MODE_SOURCE:-}" != auto ]] && log "MODE_SOURCE=auto"
             log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
             log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=steam_capture_hint"
             return 0
@@ -363,7 +325,6 @@ resolve_stream_target() {
             TARGET_SOURCE=fallback
             TARGET_MODE_SPEC=fallback
             log "No aspect-compatible host mode for client ${CLIENT_WIDTH}x${CLIENT_HEIGHT}; using configured fallback"
-            log "MODE_SOURCE=fallback"
             log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
             log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=fallback"
             return 0
@@ -388,7 +349,6 @@ resolve_stream_target() {
     TARGET_SOURCE=host_original
     TARGET_MODE_SPEC=$HOST_ORIGINAL_MODE
     log "Host-safe fallback: client hint unavailable; using the original host mode ${HOST_ORIGINAL_MODE}"
-    log "MODE_SOURCE=host_original"
     log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
     log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=host_original"
     return 0

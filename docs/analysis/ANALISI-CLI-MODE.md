@@ -1,3 +1,9 @@
+> **NOTA (2026-09-30) — SUPERATA.** L'intera modalita' CLI `--mode` descritta qui e' stata **rimossa**:
+> l'unica Launch Option pubblica e' `steam-link-display-adapter %command%` e il target di streaming
+> viene sempre risolto automaticamente. Specifica vigente:
+> [`ANALISI-RIMOZIONE-MODALITA-CLI.md`](ANALISI-RIMOZIONE-MODALITA-CLI.md). Documento conservato come
+> riferimento storico.
+>
 > **NOTA (2026-09-29) — superata in parte.** La sintassi `--mode WxH@FPS` descritta qui e' stata
 > rimossa: le Steam Launch Options accettano solo `auto` e `WxH`, il refresh e' sempre scelto dal resolver.
 > Vedi [`ANALISI-RIMOZIONE-FPS-CLI.md`](ANALISI-RIMOZIONE-FPS-CLI.md). Il resto del documento resta valido.

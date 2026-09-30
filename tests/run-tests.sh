@@ -922,284 +922,102 @@ test_geometry_no_crash_regression() {
 }
 
 
-test_cli_parser_values() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60 2560x1440@120"
-  run_wrapper --mode 2560x1440 true
-  eq "cli resolution runs" "$RC" 0
-  file_has "MODE_SOURCE=cli" "$LOG" "MODE_SOURCE=cli"
-  file_has "CLI_MODE is the requested geometry" "$LOG" "CLI_MODE=2560x1440"
-  file_has "target refresh from the resolver" "$LOG" "TARGET_MODE=2560x1440@120"
-  file_has "cli source" "$LOG" "source=cli"
-  file_lacks "client hint not read with cli" "$LOG" "CLIENT_HINT"
-  end
-}
+# --- CLI surface (spec 2026-09-30: the --mode override is removed) ----------
 
-test_cli_resolution_only() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60 1920x1200@90 1920x1200@120"
-  run_wrapper --mode 1920x1200 true
-  eq "resolution-only runs" "$RC" 0
-  file_has "CLI_MODE without refresh" "$LOG" "CLI_MODE=1920x1200"
-  file_has "geometry fixed, refresh from the resolver" "$LOG" "TARGET_MODE=1920x1200@120"
-  file_lacks "refresh not the fallback 60 implicitly" "$LOG" "TARGET_MODE=1920x1200@60"
-  end
-}
-
-test_cli_mode_equal() {
+test_cli_mode_rejected() {
   begin
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  run_wrapper --mode=1920x1200 true
-  eq "--mode=WxH accepted" "$RC" 0
-  file_has "CLI_MODE from --mode=" "$LOG" "CLI_MODE=1920x1200"
-  file_has "target from --mode=" "$LOG" "TARGET_MODE=1920x1200@60"
-  end
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  rm -f "$LOG"
-  run_wrapper --mode=1920x1200@60 true
-  ne "--mode=WxH@FPS rejected" "$RC" 0
-  file_has "invalid logged" "$LOG" "invalid --mode value"
-  end
-}
-
-test_cli_invalid_at_fps() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  printf 'PHASE=STREAMING\n' >"$STATE_DIR/state"
-  run_wrapper --mode 1920x1200@60 true
-  ne "WxH@FPS rejected" "$RC" 0
-  file_has "invalid value logged" "$LOG" "invalid --mode value: 1920x1200@60"
-  file_lacks "game not started" "$LOG" "GAME_LAUNCH"
-  eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
-  eq "no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
-  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-  file_has "state untouched" "$STATE_DIR/state" "PHASE=STREAMING"
-  end
-}
-
-test_cli_unavailable_resolution() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  run_wrapper --mode 2560x1440 true
-  ne "fails closed when the fixed resolution is unavailable" "$RC" 0
-  file_has "unavailable logged" "$LOG" "TARGET_MODE_UNAVAILABLE 2560x1440"
-  file_lacks "game not started" "$LOG" "GAME_LAUNCH"
-  end
-}
-
-test_cli_invalid_values() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
+  # A stale state must keep the fail-fast property: rejection happens before
+  # any recovery, display mutation or state change.
+  seed_stale_state
   local v
-  for v in '1920' 'x1200' '1920x' '1920x1200@' '@60' '1920x1200@abc' '-1920x1200' '0x1200' '1920x0' \
-           '1920x1200@60' '1920x1200@90' '2560x1440@120' '1280x800@75' '1920x1200@0' '1920x1200@-60' '1920x1200@60foo'; do
+  for v in "--mode" "--mode auto" "--mode 1920x1200" "--mode=1920x1200" \
+           "--mode 1920x1200@60" "--mode 1920x1200 --mode 1280x800"; do
     rm -f "$LOG"
-    run_wrapper --mode "$v" true
-    ne "rejects --mode '$v'" "$RC" 0
+    # shellcheck disable=SC2086
+    run_wrapper $v true
+    ne "rejects '$v'" "$RC" 0
+    file_has "'$v' explains --mode is unsupported" "$LOG" "no longer supported"
+    file_lacks "'$v' no GAME_LAUNCH" "$LOG" "GAME_LAUNCH"
+    eq "'$v' no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+    eq "'$v' no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
+    cmp_file "'$v' modes.cfg untouched" "$MODESF" 'StubMake StubModel:1920x1200@60'
+    file_has "'$v' stale state untouched" "$STATE_DIR/state" "PHASE=STREAMING"
   done
-  file_has "invalid value logged" "$LOG" "invalid --mode value"
-  eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
-  eq "no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
-  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   end
 }
 
-test_cli_duplicate_and_unknown() {
+test_cli_unsupported_options() {
   begin
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  rm -f "$LOG"
-  run_wrapper --mode 1920x1200 --mode 1280x800 true
-  ne "duplicate --mode rejected" "$RC" 0
-  file_has "duplicate logged" "$LOG" "duplicate --mode option"
   rm -f "$LOG"
   run_wrapper --foo bar true
   ne "unknown wrapper option rejected" "$RC" 0
   file_has "unknown logged" "$LOG" "unknown wrapper option: --foo"
-  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  file_lacks "unknown option does not launch" "$LOG" "GAME_LAUNCH"
+  rm -f "$LOG"
+  run_wrapper
+  ne "missing game command rejected" "$RC" 0
+  file_has "usage shown on missing command" "$STDERR" "Usage:"
   eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   end
 }
 
-test_cli_help() {
+test_help_minimal() {
   begin
   run_wrapper --help
   eq "help exits 0" "$RC" 0
   file_has "usage printed" "$STDERR" "Usage:"
-  file_has "mode documented" "$STDERR" "--mode WxH"
-  file_lacks "no @FPS in help" "$STDERR" "@FPS"
+  file_has "public launch option shown" "$STDERR" "steam-link-display-adapter %command%"
+  file_lacks "no --mode in help" "$STDERR" "--mode"
+  file_lacks "no WxH in help" "$STDERR" "WxH"
   absent "no state written" "$STATE_DIR/state"
   eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
   cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
   end
 }
 
-test_cli_argv_preserved() {
+test_game_argv_preserved() {
   begin
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  run_wrapper --mode 1920x1200 bash -c 'printf "%s\n" "$@" > "$0"' "$SANDBOX/game_args" --arg1 foo --arg2 bar
+  use_steam_log
+  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
+  run_wrapper bash -c 'printf "%s\n" "$@" > "$0"' "$SANDBOX/game_args" --arg1 foo --arg2 bar
   eq "runs" "$RC" 0
   cmp_file "game argv preserved verbatim" "$SANDBOX/game_args" $'--arg1\nfoo\n--arg2\nbar'
-  if grep -q 'GAME_LAUNCH' "$LOG" && ! grep -q -- '--mode' <<<"$(grep 'GAME_LAUNCH' "$LOG" | head -n1)"; then
-    say_pass "no --mode forwarded to the game"
-  else
-    say_fail "no --mode forwarded to the game"
-  fi
+  file_has "game launched through the pipeline" "$LOG" "GAME_LAUNCH"
   end
 }
 
-test_cli_precedence() {
+test_config_mode_selection() {
+  # With no CLI, the only decision is the internal STREAM_MODE.
   begin
   use_steam_log
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   printf 'STREAM_MODE=fixed\n' >"$CFG"
-  run_wrapper --mode auto true
-  eq "cli auto wins over config fixed" "$RC" 0
-  file_has "hint used" "$LOG" "source=steam_capture_hint"
-  file_lacks "config fixed not used" "$LOG" "source=fixed"
+  run_wrapper true
+  eq "fixed config runs" "$RC" 0
+  file_has "fixed target" "$LOG" "TARGET_MODE_RESOLVED 1920x1200@60 source=fixed"
+  file_lacks "hint not read in fixed mode" "$LOG" "CLIENT_HINT"
   end
   begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1080@60"
-  run_wrapper --mode 1920x1080 true
-  eq "cli geometry wins over config auto" "$RC" 0
-  file_has "cli source" "$LOG" "source=cli"
-  file_has "cli target" "$LOG" "TARGET_MODE=1920x1080@60"
+  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
+  run_wrapper true
+  eq "auto default runs" "$RC" 0
+  file_has "host original source" "$LOG" "source=host_original"
+  file_lacks "no cli source in the log" "$LOG" "source=cli"
+  file_lacks "no MODE_SOURCE log line" "$LOG" "MODE_SOURCE="
   end
+}
+
+test_state_target_fields() {
   begin
   export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   printf 'STREAM_MODE=fixed\n' >"$CFG"
-  run_wrapper true
-  eq "config fixed with no cli" "$RC" 0
-  file_has "config source" "$LOG" "source=fixed"
-  file_has "mode source config" "$LOG" "MODE_SOURCE=config"
-  end
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  run_wrapper true
-  eq "auto default with no cli" "$RC" 0
-  file_has "host original source" "$LOG" "source=host_original"
-  file_has "mode source host original" "$LOG" "MODE_SOURCE=host_original"
-  end
-}
-
-test_cli_fixed_across_clients() {
-  local i
-  local -a H=('Maximum capture: 1920x1200 60.00 FPS' 'Maximum capture: 1280x800 89.00 FPS' 'Maximum capture: 1920x1080 60.00 FPS')
-  for i in 0 1 2; do
-    begin
-    use_steam_log
-    export STUB_MODE_LIST="3440x1440@165 1920x1200@60 1920x1080@60 1280x800@90"
-    steam_hint "$STEAM_STREAM_LOG" 1 "${H[$i]}"
-    run_wrapper --mode 1920x1200 true
-    eq "client $((i + 1)) runs" "$RC" 0
-    file_has "client $((i + 1)) fixed geometry" "$LOG" "TARGET_MODE=1920x1200@60"
-    file_has "client $((i + 1)) cli source" "$LOG" "source=cli"
-    file_lacks "client $((i + 1)) hint ignored" "$LOG" "source=steam_capture_hint"
-    cmp_file "client $((i + 1)) local restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-    end
-  done
-}
-
-test_fixed_across_hosts() {
-  local i
-  local -a C=(HDMI-A-1 DP-1)
-  local -a H=("2560x1440@144" "3840x2160@120")
-  local -a L=("2560x1440@144 1920x1080@60" "3840x2160@120 1920x1080@60 1920x1200@60")
-  for i in 0 1; do
-    begin
-    set_host "${C[$i]}" "${H[$i]}" "${L[$i]}"
-    use_steam_log
-    steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1280x800 60.00 FPS'
-    printf 'STREAM_MODE=fixed\nSTREAM_WIDTH=1920\nSTREAM_HEIGHT=1080\nSTREAM_REFRESH=60\nSTREAM_ASPECT="16:9"\n' >"$CFG"
-    run_wrapper true
-    eq "fixed on host $((i + 1)) runs" "$RC" 0
-    file_has "fixed target on host $((i + 1))" "$LOG" "TARGET_MODE_RESOLVED 1920x1080@60 source=fixed"
-    file_lacks "hint not read in fixed mode on host $((i + 1))" "$LOG" "CLIENT_HINT"
-    eq "host $((i + 1)) original restored" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${H[$i]}Hz"
-    cmp_file "host $((i + 1)) xwayland restored" "$STUB_STATE_DIR/xwl1_mode" "${H[$i]%@*}"
-    end
-  done
-}
-
-test_cli_across_hosts() {
-  local i
-  local -a C=(DP-3 HDMI-A-1)
-  local -a H=("3440x1440@165" "2560x1440@144")
-  local -a L=("3440x1440@165 1920x1080@60" "2560x1440@144 1920x1080@60")
-  for i in 0 1; do
-    begin
-    set_host "${C[$i]}" "${H[$i]}" "${L[$i]}"
-    run_wrapper --mode 1920x1080 true
-    eq "cli on host $((i + 1)) runs" "$RC" 0
-    file_has "cli target on host $((i + 1))" "$LOG" "TARGET_MODE=1920x1080@60"
-    file_has "cli source on host $((i + 1))" "$LOG" "source=cli"
-    eq "host $((i + 1)) original restored after cli" "$(grep 'selecting mode' "$STUB_STATE_DIR/journal" | tail -n 1)" "drm: selecting mode ${H[$i]}Hz"
-    end
-  done
-}
-
-test_cli_first_connection() {
-  begin
-  unset STUB_STREAM_ACTIVE
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  printf 'STREAM_DETECT_WAIT_SECONDS=5\n' >"$CFG"
-  ( sleep 1; : >"$STUB_STATE_DIR/stream-on" ) &
-  run_wrapper --mode 1920x1200 true
-  eq "first connection with cli runs" "$RC" 0
-  file_has "session confirmed" "$LOG" "STREAM_SIGNAL_CONFIRMED"
-  file_has "cli target" "$LOG" "TARGET_MODE=1920x1200@60"
-  file_has "xwayland confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1200"
-  file_has "game launch" "$LOG" "GAME_LAUNCH"
-  end
-}
-
-test_cli_recovery() {
-  begin
-  seed_stale_state
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
-  run_wrapper --mode 1920x1200 true
-  eq "recovered and ran with cli" "$RC" 0
-  file_has "recovery completed" "$LOG" "Stale-state recovery complete"
-  file_has "cli target after recovery" "$LOG" "TARGET_MODE=1920x1200@60"
-  cmp_file "modes.cfg local after run" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-  cmp_file "xwayland local after run" "$STUB_STATE_DIR/xwl1_mode" '3440x1440'
-  end
-}
-
-test_cli_bypass_local() {
-  begin
-  unset STUB_STREAM_ACTIVE
-  export STUB_NO_INFO=1
-  run_wrapper --mode 1920x1200 true
-  eq "bypass launches the game" "$RC" 0
-  file_has "bypass logged" "$LOG" "bypassing display pipeline"
-  cmp_file "modes.cfg untouched" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-  eq "no screen sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
-  eq "no dynamic toggles" "$(cat "$STUB_STATE_DIR/dynamic.log")" ""
-  end
-}
-
-test_cli_streaming_geometry() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1080@60"
-  run_wrapper --mode 1920x1080 true
-  eq "runs" "$RC" 0
-  file_has "output target" "$LOG" "OUTPUT_TARGET_REACHED 1920x1080@60"
-  file_has "xwayland requested" "$LOG" "XWAYLAND1_SYNC_REQUESTED 1/1920/1080/0"
-  file_has "xwayland confirmed" "$LOG" "XWAYLAND1_SYNC_CONFIRMED 1920x1080"
-  eq "xwayland #1 first update is the target" \
-    "$(grep -m1 'xwayland server #1' "$STUB_STATE_DIR/journal")" \
-    "wlserver: Updating mode for xwayland server #1: 1920x1080@60"
-  cmp_file "local restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-  end
-}
-
-test_cli_state_persisted() {
-  begin
-  export STUB_MODE_LIST="3440x1440@165 1920x1200@60"
   set -m
-  bash "$WRAPPER" --mode 1920x1200 sleep 30 >"$STDOUT" 2>"$STDERR" &
+  bash "$WRAPPER" sleep 30 >"$STDOUT" 2>"$STDERR" &
   local wp=$!
   set +m
   local i=0
@@ -1208,12 +1026,15 @@ test_cli_state_persisted() {
     sleep 0.1; i=$((i + 1))
   done
   file_has "state TARGET_WIDTH" "$STATE_DIR/state" "TARGET_WIDTH=1920"
-  file_has "state TARGET_SOURCE" "$STATE_DIR/state" "TARGET_SOURCE=cli"
-  file_has "state TARGET_MODE_SPEC" "$STATE_DIR/state" "TARGET_MODE_SPEC=1920x1200"
+  file_has "state TARGET_HEIGHT" "$STATE_DIR/state" "TARGET_HEIGHT=1200"
+  file_has "state TARGET_SOURCE fixed" "$STATE_DIR/state" "TARGET_SOURCE=fixed"
+  file_has "state TARGET_MODE_SPEC" "$STATE_DIR/state" "TARGET_MODE_SPEC=1920x1200@60"
   file_has "state ORIGINAL_CONNECTOR" "$STATE_DIR/state" "ORIGINAL_CONNECTOR=DP-3"
   file_has "state ORIGINAL_MODE" "$STATE_DIR/state" "ORIGINAL_MODE=3440x1440@165"
   file_has "state ORIGINAL_XWAYLAND_MODE" "$STATE_DIR/state" "ORIGINAL_XWAYLAND_MODE=3440x1440"
   file_has "state DISPLAY_DESCRIPTION" "$STATE_DIR/state" "DISPLAY_DESCRIPTION=StubMake StubModel"
+  file_lacks "no cli source in state" "$STATE_DIR/state" "TARGET_SOURCE=cli"
+  file_lacks "no MODE_SOURCE in state" "$STATE_DIR/state" "MODE_SOURCE"
   kill -TERM "$wp" 2>/dev/null || true
   wait "$wp" 2>/dev/null || true
   end
@@ -1239,7 +1060,7 @@ test_rename_files_and_identity() {
   exists "new conf example" "$PKG_DIR/config/steam-link-display-adapter.conf.example"
   absent "old conf example gone" "$PKG_DIR/$LEG_BRAND.conf.example"
   run_wrapper --help
-  file_has "help shows new executable" "$STDERR" 'steam-link-display-adapter \[OPTIONS\] %command%'
+  file_has "help shows new executable" "$STDERR" 'steam-link-display-adapter %command%'
   file_lacks "help has no old executable" "$STDERR" "$LEG_PROJ"
   end
 }
@@ -1320,6 +1141,7 @@ test_project_structure() {
   for a in ANALISI-FUNZIONALE.md ANALISI-FUNZIONALE-PRIMA-CONNESSIONE.md \
            ANALISI-RISOLUZIONE-DINAMICA.md ANALISI-XWAYLAND-1.md \
            ANALISI-CLI-MODE.md ANALISI-RIMOZIONE-FPS-CLI.md \
+           ANALISI-RIMOZIONE-MODALITA-CLI.md \
            ANALISI-HOST-DISPLAY-AGNOSTIC.md; do
     exists "analysis $a" "$PKG_DIR/docs/analysis/$a"
   done
@@ -1388,24 +1210,13 @@ TESTS=(
   client_sequence_recomputed
   first_connection_hint
   geometry_no_crash_regression
-  cli_parser_values
-  cli_resolution_only
-  cli_mode_equal
-  cli_invalid_at_fps
-  cli_unavailable_resolution
-  cli_invalid_values
-  cli_duplicate_and_unknown
-  cli_help
-  cli_argv_preserved
-  cli_precedence
-  cli_fixed_across_clients
+  cli_mode_rejected
+  cli_unsupported_options
+  help_minimal
+  game_argv_preserved
+  config_mode_selection
   fixed_across_hosts
-  cli_across_hosts
-  cli_first_connection
-  cli_recovery
-  cli_bypass_local
-  cli_streaming_geometry
-  cli_state_persisted
+  state_target_fields
   rename_repo_namespace_clean
   rename_files_and_identity
   rename_install_paths

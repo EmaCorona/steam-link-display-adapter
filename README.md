@@ -291,31 +291,19 @@ Steam Link inactive
 
 In Desktop Mode, or in Game Mode with no stream running, the display is left untouched.
 
-## Modes
+## Launch Option
 
-### Auto
+Steam → Game → **Properties → Launch Options**:
 
 ```text
 steam-link-display-adapter %command%
 ```
 
-The target is resolved dynamically from the Steam Link client.
+The Launch Option only activates the adapter: the target is resolved dynamically from the Steam Link
+client against the modes the host really advertises. The display target is never chosen from the
+command line.
 
-### Explicit auto
-
-```text
-steam-link-display-adapter --mode auto %command%
-```
-
-### Fixed resolution
-
-```text
-steam-link-display-adapter --mode 1920x1200 %command%
-```
-
-`--mode WxH` fixes the geometry; the refresh rate is selected automatically.
-
-Details: [`docs/analysis/ANALISI-CLI-MODE.md`](docs/analysis/ANALISI-CLI-MODE.md).
+Details: [`docs/analysis/ANALISI-RIMOZIONE-MODALITA-CLI.md`](docs/analysis/ANALISI-RIMOZIONE-MODALITA-CLI.md).
 
 ## Dynamic resolution
 

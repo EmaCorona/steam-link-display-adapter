@@ -77,9 +77,8 @@ MODES_FILE="$HOME/.config/gamescope/modes.cfg"
 # written by an older build is still recovered using the LOCAL_* values if
 # this file defines them; they can be deleted.
 
-# Per-game override: pass it in the Steam Launch Options instead of editing this
-# file, e.g.  steam-link-display-adapter --mode 1920x1200 %command%
-#   --mode auto       -> dynamic resolution from the client (same as STREAM_MODE=auto)
-#   --mode WxH        -> force WIDTH/HEIGHT; the resolver chooses a compatible refresh
-# (the refresh is never specified from the CLI: any "@FPS" form is invalid)
-# CLI --mode wins over STREAM_MODE. Run `steam-link-display-adapter --help` for usage.
+# Steam Launch Option:
+#   steam-link-display-adapter %command%
+# The target is resolved automatically: STREAM_MODE (below) selects the internal
+# behaviour and is never chosen from the command line. Run
+# `steam-link-display-adapter --help` for the public usage.

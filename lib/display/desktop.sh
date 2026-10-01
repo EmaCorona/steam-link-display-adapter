@@ -143,6 +143,67 @@ desktop_mode_list_contains() {
     [[ $'\n'"$list"$'\n' == *$'\n'"$wanted"$'\n'* ]]
 }
 
+desktop_kscreen_apply() {
+    # Best-effort execution of one kscreen-doctor request. Success is NOT decided
+    # here on the tool's own words: kscreen-doctor exits 0 while rejecting or
+    # ignoring a request (measured 2026-10-01), so the caller establishes success
+    # through a postcondition (desktop_kscreen_verify_field) or through the final
+    # layout verification. A non-zero exit remains a failure.
+    [[ $# -gt 0 ]] || return 0
+    local out
+    if ! out=$(TERM=dumb NO_COLOR=1 kscreen-doctor "$@" 2>&1); then
+        fail "kscreen-doctor failed (non-zero exit): $*"
+        return 1
+    fi
+    # Diagnostic only: never the source of truth for success or failure.
+    [[ -n "$out" ]] && log "kscreen-doctor said: ${out//$'\n'/ }"
+    return 0
+}
+
+desktop_output_field() {
+    # Read one restorable property (enabled|primary|mode|position|scale|rotation)
+    # of one output from a fresh KScreen snapshot. Fails when the output is gone.
+    #
+    # The snapshot is a single line of ';'-separated records
+    # (connector|enabled|primary|priority|mode|position|scale|rotation), so the
+    # records must be split on ';' before matching the connector: an awk on '|'
+    # over the whole line only ever matches the first record.
+    local conn=$1 field=$2 snap record name enabled primary prio mode pos scale rot
+    snap=$(desktop_layout_snapshot 2>/dev/null || true)
+    [[ -n "$snap" ]] || return 1
+    for record in ${snap//;/ }; do
+        IFS='|' read -r name enabled primary prio mode pos scale rot <<<"$record"
+        [[ "$name" == "$conn" ]] || continue
+        case "$field" in
+            enabled)  printf '%s\n' "$enabled" ;;
+            primary)  printf '%s\n' "$primary" ;;
+            mode)     _desktop_normalize_mode "$mode" 2>/dev/null || printf '%s\n' "$mode" ;;
+            position) printf '%s\n' "$pos" ;;
+            scale)    printf '%s\n' "$scale" ;;
+            rotation) printf '%s\n' "$rot" ;;
+            *) return 1 ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+desktop_kscreen_verify_field() {
+    # Postcondition for a single-property request: the wanted state must be
+    # observable in KScreen within the bounded mode timeout, otherwise the
+    # request failed even though kscreen-doctor reported success.
+    local conn=$1 field=$2 want=$3 deadline actual=''
+    deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
+    while (( SECONDS <= deadline )); do
+        actual=$(desktop_output_field "$conn" "$field" 2>/dev/null || true)
+        [[ "$actual" == "$want" ]] && return 0
+        sleep "$POLL_INTERVAL_SECONDS"
+    done
+    fail "Desktop verification failed: output '$conn' $field=${actual:-unknown}, expected=$want"
+    log_event DESKTOP_VERIFY_FAILED "$conn/$field"
+    return 1
+}
+
 desktop_get_current_mode() {
     local connector block token
     connector=$(host_connector) || return 1
@@ -168,27 +229,6 @@ desktop_is_target_mode_active() {
     [[ "$cur_w" == "$want_w" && "$cur_h" == "$want_h" ]]
 }
 
-desktop_apply_target() {
-    local connector mode
-    connector=$(host_connector) || return 1
-    mode="${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
-    desktop_mode_list_contains "$mode" || {
-        fail "Desktop output '$connector' does not advertise $mode"
-        return 1
-    }
-    log "Applying Desktop target mode: $connector -> $mode"
-    kscreen-doctor "output.$connector.mode.$mode" >/dev/null
-}
-
-desktop_wait_for_target_mode() {
-    local deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
-    while (( SECONDS <= deadline )); do
-        if desktop_is_target_mode_active; then return 0; fi
-        sleep "$POLL_INTERVAL_SECONDS"
-    done
-    return 1
-}
-
 desktop_wait_for_original_mode() {
     local want=${1:-${HOST_ORIGINAL_MODE:-}}
     [[ -n "$want" ]] || return 1
@@ -209,13 +249,22 @@ desktop_restore_host_mode() {
         log "WARNING: no original Desktop display mode recorded; skipping mode restore"
         return 0
     }
+    # KScreen reports the refresh with decimals ("3440x1440@165.00") while both
+    # the advertised mode list and kscreen-doctor use the normalized form: the
+    # raw token makes kscreen-doctor reject the whole call -- and it exits 0
+    # while doing so, so the mistake would otherwise be silent.
+    mode=$(_desktop_normalize_mode "$mode") || {
+        log "WARNING: unparsable original Desktop mode '$mode'; skipping mode restore"
+        return 0
+    }
     connector=$(host_connector) || return 1
     desktop_mode_list_contains "$mode" || {
         fail "original Desktop mode '$mode' is no longer advertised by '$connector'"
         return 1
     }
     log "Restoring Desktop host mode: $connector -> $mode"
-    kscreen-doctor "output.$connector.mode.$mode" >/dev/null
+    desktop_kscreen_apply "output.$connector.mode.$mode" || return 1
+    desktop_kscreen_verify_field "$connector" mode "$mode"
 }
 
 
@@ -232,108 +281,66 @@ desktop_monitor_connector() {
     printf '%s\n' "$connector"
 }
 
-desktop_dpms_report() {
-    # "dpms mode for screen DP-3: on" -> current DPMS state for one connector.
-    local connector=$1
-    TERM=dumb NO_COLOR=1 kscreen-doctor --dpms show 2>/dev/null |
-        sed -E 's/\x1B\[[0-9;]*m//g' |
-        grep -F "screen ${connector}:" | tail -n1 | sed -E 's/.*: *//'
-}
+desktop_screen_sleep() {
+    # Single behaviour: the physical output is removed from the compositor
+    # layout while the virtual stream output carries the session. There is no
+    # DPMS fallback and no selectable policy: the virtual canvas is the only
+    # supported Desktop path.
+    if [[ "${VIRTUAL_DISPLAY_ACTIVE:-0}" != 1 ]]; then
+        fail "refusing to disable the physical output without a prepared virtual stream display"
+        return 1
+    fi
 
-desktop_set_monitor_power() {
-    # Turn the physical panel off/on through DPMS. The output stays attached to
-    # the compositor, so Steam Link keeps a surface to capture; this is the
-    # Desktop equivalent of the Gamescope external-screen sleep. Removing the
-    # output instead (output.<conn>.disable) would detach it from the
-    # compositor and break the capture.
-    local want=$1 connector current deadline
-    connector=$(desktop_monitor_connector) || {
-        fail "unable to resolve the Desktop output for monitor power"
+    local connector
+    connector="${HOST_CONNECTOR:-}"
+    [[ -n "$connector" ]] || connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
+    [[ -n "$connector" ]] || {
+        fail "unable to resolve the physical Desktop output to disable"
         return 1
     }
-    log "Setting Desktop DPMS '$want' (output $connector)"
-    if ! kscreen-doctor --dpms "$want" >/dev/null; then
-        fail "kscreen-doctor --dpms $want failed for $connector"
+
+    log "Disabling physical Desktop output for virtual stream display: $connector"
+    desktop_kscreen_apply "output.$connector.disable" || {
+        fail "failed to disable physical Desktop output '$connector'"
         return 1
-    fi
-    deadline=$((SECONDS + MODE_TIMEOUT_SECONDS))
-    while (( SECONDS <= deadline )); do
-        current=$(desktop_dpms_report "$connector" 2>/dev/null || true)
-        [[ "$current" == "$want" ]] && return 0
-        sleep "$POLL_INTERVAL_SECONDS"
-    done
-    fail "Desktop DPMS did not reach '$want' for $connector (current=${current:-unknown})"
-    return 1
-}
-
-desktop_screen_sleep() {
-    if [[ "${MONITOR_POWER_MODE:-off}" == off && "${VIRTUAL_DISPLAY_ACTIVE:-0}" == 1 ]]; then
-        local connector
-        connector="${HOST_CONNECTOR:-}"
-        [[ -n "$connector" ]] || connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
-        [[ -n "$connector" ]] || {
-            fail "unable to resolve the physical Desktop output to disable"
-            return 1
-        }
-
-        log "Disabling physical Desktop output for virtual stream display: $connector"
-        kscreen-doctor "output.$connector.disable" >/dev/null || {
-            fail "failed to disable physical Desktop output '$connector'"
-            return 1
-        }
-        log_event DESKTOP_PHYSICAL_OUTPUT_DISABLED "$connector"
-        return 0
-    fi
-
-    desktop_set_monitor_power off
+    }
+    # Postcondition: the physical output must be observably out of the layout.
+    desktop_kscreen_verify_field "$connector" enabled 0 || return 1
+    log_event DESKTOP_PHYSICAL_OUTPUT_DISABLED "$connector"
+    return 0
 }
 
 desktop_screen_wake() {
-    if [[ "${VIRTUAL_DISPLAY_ACTIVE:-0}" == 1 ]]; then
-        local connector
-        connector="${HOST_CONNECTOR:-}"
-        [[ -n "$connector" ]] || connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
-        [[ -n "$connector" ]] || {
-            fail "unable to resolve the physical Desktop output to enable"
-            return 1
-        }
+    # Counterpart of the sleep above, also used by cleanup and recovery when
+    # the state says the physical output was removed from the layout.
+    local connector
+    connector="${HOST_CONNECTOR:-}"
+    [[ -n "$connector" ]] || connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true)
+    [[ -n "$connector" ]] || {
+        fail "unable to resolve the physical Desktop output to enable"
+        return 1
+    }
 
-        log "Re-enabling physical Desktop output after virtual stream display: $connector"
-        kscreen-doctor "output.$connector.enable" >/dev/null || {
-            fail "failed to enable physical Desktop output '$connector'"
-            return 1
-        }
-        return 0
-    fi
-
-    desktop_set_monitor_power on
-}
-
-desktop_apply_target_mode() {
-    desktop_apply_target
-    desktop_wait_for_target_mode
+    log "Re-enabling physical Desktop output after virtual stream display: $connector"
+    desktop_kscreen_apply "output.$connector.enable" || {
+        fail "failed to enable physical Desktop output '$connector'"
+        return 1
+    }
+    # Postcondition: the physical output must be observably back in the layout.
+    desktop_kscreen_verify_field "$connector" enabled 1 || return 1
+    log_event DESKTOP_PHYSICAL_OUTPUT_ENABLED "$connector"
+    return 0
 }
 
 desktop_prepare_stream_mode() {
     log_event OUTPUT_PREPARE_START
     state_write 'PREPARING'
 
-    local current
-    if [[ "${MONITOR_POWER_MODE:-off}" == off ]]; then
-        # Monitor-off Desktop sessions use a dedicated KWin virtual output.
-        # The physical output is left enabled until the common monitor-power
-        # phase has a verified virtual canvas to move the game onto.
-        desktop_virtual_display_prepare || return 1
-        # The virtual output is created at the resolved target, so that is the
-        # geometry to report (the physical output is irrelevant here).
-        current="${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
-    else
-        if ! desktop_apply_target_mode; then
-            fail "Desktop target mode could not be applied or verified"
-            return 1
-        fi
-        current=$(desktop_get_current_mode 2>/dev/null || printf '%sx%s@%s' "$TARGET_WIDTH" "$TARGET_HEIGHT" "$TARGET_REFRESH")
-    fi
+    # Single Desktop path: a KWin virtual output is created at the resolved
+    # client geometry, so the stream geometry never depends on the physical
+    # mode set (the physical output is disabled in the sleep phase).
+    desktop_virtual_display_prepare || return 1
+    local current="${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
     log "Verified Desktop target mode: $current (source=$TARGET_SOURCE)"
     log_event OUTPUT_TARGET_REACHED "$current"
 
@@ -362,6 +369,14 @@ desktop_restore_host_state() {
         desktop_virtual_display_destroy || return 1
     fi
 
+    # Verify the final state after the complete restore sequence, including
+    # virtual-output removal. Destroying a virtual output can trigger compositor
+    # re-placement, so verification must observe the layout that the user is
+    # actually left with.
+    if [[ -n "$layout" ]]; then
+        desktop_layout_verify "$layout" || return 1
+    fi
+
     original_mode=$(original_mode_for_restore)
     if [[ -n "$original_mode" ]]; then
         if desktop_wait_for_original_mode "$original_mode"; then
@@ -385,6 +400,9 @@ desktop_recover_stale_state() {
     fi
     if [[ -n "$stale_layout" ]]; then
         desktop_layout_restore "$stale_layout" || return 1
+        # The virtual output is already gone during stale recovery, so verify
+        # immediately that the saved physical layout is actually in place.
+        desktop_layout_verify "$stale_layout" || return 1
     fi
 
     local verify_mode

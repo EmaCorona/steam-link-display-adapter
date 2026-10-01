@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# KDE/KWin virtual stream display for Desktop Mode monitor-off sessions.
+# KDE/KWin virtual stream display for Desktop Mode Steam Link sessions.
 #
 # `krfb-virtualmonitor` creates a compositor-level virtual output, but it is
 # also a VNC server (libvncserver): it necessarily listens on a TCP port and the
@@ -12,7 +12,7 @@
 #     has no connectivity to the host network at all (only its own loopback);
 #   * a random per-run VNC password is generated, passed to the process and
 #     never logged or persisted (the unit name is what identifies the session);
-#   * when the isolation cannot be established the whole monitor-off mode fails
+#   * when the isolation cannot be established the whole Desktop stream fails
 #     closed: no fallback to DPMS or to a bare output disable;
 #   * the lifecycle is unit-based (systemctl --user stop), never a bare kill of
 #     a PID read from a state file.
@@ -20,12 +20,6 @@
 set -Eeuo pipefail
 
 DESKTOP_VIRTUAL_DISPLAY_NAME=${DESKTOP_VIRTUAL_DISPLAY_NAME:-SteamLinkDisplayAdapter}
-
-desktop_virtual_mode_selected() {
-    # Monitor-off Desktop sessions stream through a virtual output whose
-    # geometry is created on demand (not taken from the physical mode set).
-    [[ "${MONITOR_POWER_MODE:-off}" == off ]]
-}
 
 desktop_virtual_display_command_available() {
     command -v krfb-virtualmonitor >/dev/null 2>&1
@@ -202,7 +196,12 @@ desktop_virtual_display_set_primary() {
     }
 
     log "Setting Desktop virtual stream display as primary: $output"
-    kscreen-doctor "output.$output.primary" >/dev/null
+    desktop_kscreen_apply "output.$output.primary" || {
+        fail "failed to set '$output' as the primary Desktop output"
+        return 1
+    }
+    # Postcondition: the virtual output must be observably primary.
+    desktop_kscreen_verify_field "$output" primary 1 || return 1
 }
 
 desktop_virtual_display_destroy() {

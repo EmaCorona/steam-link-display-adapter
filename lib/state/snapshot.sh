@@ -25,8 +25,21 @@ restore_modes_file() {
         tmp=$(mktemp --tmpdir="$(dirname -- "$MODES_FILE")" '.modes.cfg.restore.XXXXXX')
         cp --reflink=auto -- "$MODES_BACKUP" "$tmp"
         mv -f -- "$tmp" "$MODES_FILE"
+        # Postcondition: the file must be the backup, byte for byte. A partial
+        # or refused write would leave Gamescope with a modes.cfg it never had,
+        # which is worse than the streamed mode being still selected.
+        if ! cmp -s -- "$MODES_BACKUP" "$MODES_FILE"; then
+            log "ERROR: modes.cfg restore did not reproduce the backup"
+            log_event MODES_CFG_VERIFY_FAILED
+            return 1
+        fi
     else
         rm -f -- "$MODES_FILE"
+        if [[ -e "$MODES_FILE" ]]; then
+            log "ERROR: modes.cfg was absent at session start but still exists after restore"
+            log_event MODES_CFG_VERIFY_FAILED
+            return 1
+        fi
     fi
     log "Restored modes.cfg"
 }

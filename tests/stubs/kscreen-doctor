@@ -6,8 +6,8 @@
 #     rotation, priority, enabled and primary;
 #   * the atomic multi-setting form `output.<c>.<k>[.<v>] ...` (kscreen-doctor
 #     applies every setting in one invocation);
-#   * `-o/--outputs` reporting and `--dpms show|on|off`;
-#   * failure injection (STUB_KSCREEN_FAIL, STUB_KSCREEN_DPMS_FAIL).
+#   * `-o/--outputs` reporting;
+#   * failure injection (STUB_KSCREEN_FAIL).
 #
 # Outputs are stored as one line each:
 #   n|connector|mode|position|scale|rotation|priority|enabled|primary|connected
@@ -48,11 +48,30 @@ _init() {
 
 _virtual_block() {
     [[ -f "$SD/virtual_display_present" ]] || return 1
-    local vname vres
+    local vname vres vprimary=0
     vname=$(cat "$SD/virtual_display_name" 2>/dev/null || true)
     vres=$(cat "$SD/virtual_display_resolution" 2>/dev/null || true)
     [[ -n "$vname" ]] || return 1
-    printf '%s|%s|%s|0,0|1|1|9|1|0|1\n' "99" "Virtual-$vname" "${vres:-1920x1080}@60"
+    [[ -f "$SD/virtual_display_primary" ]] && vprimary=1
+    printf '%s|%s|%s|0,0|1|1|9|1|%s|1\n' "99" "Virtual-$vname" "${vres:-1920x1080}@60" "$vprimary"
+}
+
+_set_virtual_primary() {
+    # KScreen keeps exactly one primary output: promoting the virtual output
+    # demotes every physical one, and vice versa (see the physical 'primary'
+    # case, which clears the virtual marker).
+    local value=$1 line nn cc mm pp ss rr prr enn pnn coo tmp
+    if [[ "$value" == 1 ]]; then
+        : >"$SD/virtual_display_primary"
+        tmp=$(mktemp)
+        while IFS= read -r line; do
+            IFS='|' read -r nn cc mm pp ss rr prr enn pnn coo <<<"$line"
+            printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$nn" "$cc" "$mm" "$pp" "$ss" "$rr" "$prr" "$enn" 0 "$coo" >>"$tmp"
+        done <"$OUT"
+        mv -f "$tmp" "$OUT"
+    else
+        rm -f "$SD/virtual_display_primary"
+    fi
 }
 
 print_outputs() {
@@ -70,15 +89,22 @@ print_outputs() {
         printf '\tpriority %s\n' "$prio"
         printf '\tDisplayPort\n'
         printf '\tModes:'
-        local i=1 m marker
+        local i=1 m marker modes
+        # A real compositor always lists the output's current mode among its
+        # modes and marks it. The shared stub list may not contain it (an extra
+        # output advertises its own modes), so it is added here: without the
+        # marker the wrapper cannot read the current mode at all.
+        modes=$(_mode_list)
+        if [[ -n "$mode" ]] && ! grep -Fxq -- "$mode" <<<"$modes"; then
+            modes+=$'\n'"$mode"
+        fi
         while IFS= read -r m; do
             [[ -n "$m" ]] || continue
             marker=
-            [[ "$m" == "$mode" || "$m" == "${mode%@*}@${mode#*@}" ]] || true
             [[ "$m" == "$mode" ]] && marker='*'
             printf ' %s:%s%s' "$i" "$m" "$marker"
             i=$((i + 1))
-        done < <(_mode_list)
+        done <<<"$modes"
         printf '\n'
         printf '\tGeometry: %s %s\n' "$pos" "${mode%@*}"
         printf '\tScale: %s\n' "$scale"
@@ -126,7 +152,28 @@ apply_settings() {
         setting=${arg#output."$conn".}; setting=${setting%%.*}
         value=${arg#output."$conn"."$setting"}; value=${value#.}
 
+        # The virtual output is not part of the physical model file: it is
+        # rendered separately by _virtual_block, so its settings must be handled
+        # here instead of being silently skipped by the grep below (a real
+        # compositor applies them like any other output).
+        if [[ "$conn" == Virtual-* ]]; then
+            case "$setting" in
+                primary)
+                    # The wrapper uses the bare form (output.<conn>.primary),
+                    # which means "make this output primary": a value, when
+                    # present, is honoured (the physical branch behaves the same).
+                    _set_virtual_primary "${value:-1}"
+                    printf 'primary %s\n' "$conn" >>"$LOG" ;;
+            esac
+            continue
+        fi
+
         grep -qF -- "|$conn|" "$OUT" || continue
+
+        if [[ "${STUB_KSCREEN_NOOP:-}" == "$setting" || "${STUB_KSCREEN_NOOP:-}" == "$setting:$conn" ]]; then
+            printf 'noop %s %s\n' "$conn" "$setting" >>"$LOG"
+            continue
+        fi
 
         case "$setting" in
             enable)
@@ -150,17 +197,29 @@ apply_settings() {
                 done <"$OUT"
                 mv -f "$tmp" "$OUT"
                 printf '%s\n' "$conn" >"$SD/kscreen_primary"
+                rm -f "$SD/virtual_display_primary"
                 printf 'primary %s\n' "$conn" >>"$LOG" ;;
             mode)
                 [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
                 if [[ "$conn" == Virtual-* ]]; then
-                    [[ "$value" == "$(cat "$SD/virtual_display_resolution" 2>/dev/null)"* ]] || exit 9
+                    if [[ "$value" != "$(cat "$SD/virtual_display_resolution" 2>/dev/null)"* ]]; then
+                        printf 'Unable to parse arguments: output.%s.mode.%s\n' "$conn" "$value"
+                        exit 0
+                    fi
                     printf '%s\n' "$value" >"$SD/virtual_display_mode"
                 else
-                    # each output advertises its own modes: the current one is
-                    # always acceptable, the shared list models the rest
+                    # Each output advertises its own modes: the current one is
+                    # always acceptable, the shared list models the rest. The
+                    # real kscreen-doctor rejects an unadvertised mode with a
+                    # message and still exits 0, so the stub must not be
+                    # stricter about the exit code than reality.
+                    local modes
                     cur=$(awk -F'|' -v c="$conn" '$2 == c { print $3; exit }' "$OUT")
-                    [[ "$value" == "$cur" ]] || _mode_list | grep -Fxq -- "$value" || exit 9
+                    modes=$(_mode_list)
+                    if [[ "$value" != "$cur" ]] && [[ $'\n'"$modes"$'\n' != *$'\n'"$value"$'\n'* ]]; then
+                        printf 'Unable to parse arguments: output.%s.mode.%s\n' "$conn" "$value"
+                        exit 0
+                    fi
                 fi
                 _set_field "$conn" mode "$value"
                 printf '%s\n' "$value" >"$SD/kscreen_mode"
@@ -189,29 +248,17 @@ case "${1:-}" in
         print_outputs
         exit 0
         ;;
-    --dpms)
-        case "${2:-}" in
-            show)
-                if [[ -f "$SD/virtual_display_present" ]] && [[ ! -f "$SD/kscreen_primary" ]]; then :; fi
-                local conn
-                conn=$(cut -d'|' -f2 "$OUT" 2>/dev/null | head -n1)
-                printf 'dpms mode for screen %s: %s\n' "${conn:-DP-3}" "$(cat "$SD/kscreen_dpms" 2>/dev/null || printf 'on')"
-                exit 0
-                ;;
-            on|off)
-                if [[ "${STUB_KSCREEN_DPMS_FAIL:-0}" == 1 || "${STUB_KSCREEN_DPMS_FAIL:-0}" == "$2" ]]; then exit 9; fi
-                printf '%s\n' "$2" >"$SD/kscreen_dpms"
-                printf 'dpms:%s\n' "$2" >>"$LOG"
-                exit 0
-                ;;
-            *) exit 2 ;;
-        esac
-        ;;
     "")
         exit 0
         ;;
     output.*)
         [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
+        if [[ -n "${STUB_KSCREEN_REJECT:-}" ]]; then
+            # Models the real tool's worst habit: it refuses the request,
+            # prints why, and still reports success through the exit code.
+            printf 'Unable to parse arguments: %s\n' "$1"
+            exit 0
+        fi
         apply_settings "$@"
         exit 0
         ;;

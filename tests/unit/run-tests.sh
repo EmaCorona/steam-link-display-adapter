@@ -421,9 +421,6 @@ test_desktop_backend() {
   eq "Desktop current mode discovery" "$(desktop_get_current_mode)" '3440x1440@165'
   eq "Desktop mode list" "$(desktop_get_host_mode_list)" $'1920x1200@60\n3440x1440@165'
   TARGET_WIDTH=1920 TARGET_HEIGHT=1200 TARGET_REFRESH=60
-  run_expected desktop_apply_target_mode
-  success "Desktop target mode applies and verifies" "$RC"
-  eq "Desktop target is active" "$(desktop_get_current_mode)" '1920x1200@60'
   HOST_ORIGINAL_MODE='3440x1440@165'
   run_expected desktop_restore_host_state
   success "Desktop host mode restores" "$RC"

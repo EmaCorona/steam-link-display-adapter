@@ -53,7 +53,10 @@ case "${1:-}" in
     printf 'backend_set_dirty: Dirty the backend state and re-poll\n'
     ;;
   *)
-    exit 0
+    # A real gamescopectl rejects an unknown subcommand: staying silent would
+    # let a wrapper typo look like a successful mutation.
+    printf 'gamescopectl: unknown command: %s\n' "${1:-}" >&2
+    exit 2
     ;;
 esac
 exit 0

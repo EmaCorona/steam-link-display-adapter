@@ -111,7 +111,7 @@ begin() {
   export XWAYLAND_EXTRA_DISPLAYS=":98"
   export STUB_XWL1_DISPLAY=:98
   export STUB_XWL0_DISPLAY=:99
-  unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT STUB_KSCREEN_AVAILABLE STUB_KSCREEN_CONNECTOR STUB_KSCREEN_MODE_LIST STUB_KSCREEN_CURRENT_MODE STUB_KSCREEN_PRIMARY STUB_KSCREEN_FAIL STUB_KSCREEN_DPMS_FAIL STUB_KRFB_FAIL STUB_KRFB_NO_OUTPUT STUB_KSCREEN_EXTRA STUB_SYSTEMD_STATE STUB_FORCE_ENABLE_FAIL STUB_STREAM_ON_SUBSCRIBE DRM_MODES_GLOB 2>/dev/null || true
+  unset STUB_SET_DIRTY_NOOP STUB_SET_DIRTY_FAIL STUB_SLEEP_FAIL STUB_WAKE_FAIL STUB_ALLOW_FAIL STUB_CONNECTOR STUB_NO_INFO STUB_REPICK_REFRESH STUB_STREAM_ACTIVE STUB_XWL_FAIL STUB_XWL_NOOP STUB_XWL1_ABSENT STUB_KSCREEN_AVAILABLE STUB_KSCREEN_CONNECTOR STUB_KSCREEN_MODE_LIST STUB_KSCREEN_CURRENT_MODE STUB_KSCREEN_PRIMARY STUB_KSCREEN_FAIL STUB_KRFB_FAIL STUB_KRFB_NO_OUTPUT STUB_KSCREEN_EXTRA STUB_SYSTEMD_STATE STUB_FORCE_ENABLE_FAIL STUB_STREAM_ON_SUBSCRIBE DRM_MODES_GLOB 2>/dev/null || true
   unset STREAM_MODE STREAM_CAPTURE_HINT_MAX_AGE_SECONDS STREAM_NO_COMPATIBLE_FALLBACK STREAM_ASPECT_TOLERANCE STEAM_STREAM_LOG STEAM_STREAM_LOG_PREV LOCAL_WIDTH LOCAL_HEIGHT LOCAL_REFRESH STREAM_ALT_REFRESHES 2>/dev/null || true
   export STUB_STREAM_ACTIVE=1
   mkdir -p "$HOME/.config/gamescope" "$XDG_CONFIG_HOME/steam-link-display-adapter" "$XDG_STATE_HOME/steam-link-display-adapter" "$STUB_STATE_DIR"
@@ -127,7 +127,6 @@ begin() {
   printf 'StubMake StubModel:3440x1440@165 0\n' >"$MODESF"
   printf '3440x1440@165\n' >"$STUB_STATE_DIR/mode"
   printf '3440x1440@165\n' >"$STUB_STATE_DIR/kscreen_mode"
-  printf 'on\n' >"$STUB_STATE_DIR/kscreen_dpms"
   printf '3440x1440\n' >"$STUB_STATE_DIR/xwl1_mode"
   printf 'drm: selecting mode 3440x1440@165Hz\n' >"$STUB_STATE_DIR/journal"
   : >"$STUB_STATE_DIR/dynamic.log"
@@ -345,7 +344,7 @@ test_sleep_failure() {
   export STUB_SLEEP_FAIL=1
   run_wrapper true
   ne "fails when screen sleep fails" "$RC" 0
-  file_has "monitor-off failure logged" "$LOG" "failed to turn the monitor off during Steam Link streaming"
+  file_has "physical display sleep failure logged" "$LOG" "failed to sleep the physical display during Steam Link streaming"
   file_has "wake still attempted" "$STUB_STATE_DIR/sleep.log" '^0$'
   file_lacks "game not started" "$LOG" "Launching game:"
 }
@@ -488,20 +487,6 @@ test_desktop_mode_delayed_stream() {
   cmp_file "Desktop delayed stream restored" "$STUB_STATE_DIR/kscreen_mode" '2560x1440@144'
 }
 
-test_desktop_mode_apply_failure_fails_closed() {
-  begin
-  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3 STUB_KSCREEN_FAIL=1
-  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
-  use_steam_log
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  # --monitor on keeps the physical output path (the virtual path does not set
-  # a physical mode, so a mode-apply failure cannot happen there).
-  run_wrapper --monitor on true
-  ne "Desktop apply failure returns non-zero" "$RC" 0
-  file_has "Desktop apply failure logged" "$LOG" "Desktop target mode could not be applied or verified"
-  cmp_file "Desktop apply failure leaves original mode" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
-  file_lacks "Desktop apply failure did not launch game" "$LOG" "GAME_LAUNCH"
-}
 
 test_desktop_mode_isolated_from_gamescope() {
   begin
@@ -563,76 +548,104 @@ test_desktop_backend_redetected_after_recovery() {
   file_has "bypass after recovery" "$LOG" "bypassing display pipeline"
 }
 
-# --- monitor power policy (spec --monitor on|off) ---------------------------
+# --- single physical-display behaviour (no monitor policy) -------------------
 
-test_monitor_gamescope_default_off() {
+test_gamescope_physical_display_sleep() {
   begin
   use_steam_log
   steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
-  eq "Gamescope default run exits 0" "$RC" 0
-  file_has "monitor turned off by default" "$STUB_STATE_DIR/sleep.log" '^1$'
-  file_has "monitor woken during cleanup" "$STUB_STATE_DIR/sleep.log" '^0$'
-  file_has "policy applied: off" "$LOG" "MONITOR_POWER_APPLIED off"
+  eq "Gamescope stream run exits 0" "$RC" 0
+  file_has "physical display slept during the stream" "$STUB_STATE_DIR/sleep.log" '^1$'
+  file_has "physical display woken during cleanup" "$STUB_STATE_DIR/sleep.log" '^0$'
+  file_has "the sleep is logged" "$LOG" "PHYSICAL_DISPLAY_SLEEPING"
+  file_has "the restore is logged" "$LOG" "PHYSICAL_DISPLAY_RESTORED"
   cmp_file "modes.cfg restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
-test_monitor_gamescope_off_explicit() {
+test_desktop_layout_verification() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  # The stub silently ignores the saved position while returning success. The
+  # post-restore verification compares the final KScreen state with the saved
+  # profile and must surface the mismatch.
+  #
+  # The physical primary is deliberately NOT used here: when the temporary
+  # virtual output disappears the compositor promotes another output, so the
+  # primary flag converges anyway and the mismatch would not be observable
+  # (measured 2026-10-01).
+  export STUB_KSCREEN_NOOP='position:DP-3'
+  printf '1920x1200@60\n' >"$STUB_STATE_DIR/kscreen_mode"
+  {
+    printf 'VERSION=1\n'
+    printf 'PHASE=STREAMING\n'
+    printf 'MODES_BACKUP=%s\n' "$BACKUP"
+    printf 'MODES_EXISTED=0\n'
+    printf 'SCREEN_SLEEP_REQUESTED=0\n'
+    printf 'VIRTUAL_DISPLAY_ACTIVE=0\n'
+    printf 'XWAYLAND_SYNCED=0\n'
+    printf 'DISPLAY_BACKEND=desktop\n'
+    printf 'ORIGINAL_CONNECTOR=DP-3\n'
+    printf 'ORIGINAL_PRIMARY_OUTPUT=DP-3\n'
+    printf 'ORIGINAL_DESKTOP_LAYOUT=DP-3|1|1|1|3440x1440@165|1234,0|1|1\n'
+    printf 'ORIGINAL_MODE=3440x1440@165\n'
+    printf 'ORIGINAL_XWAYLAND_MODE=\n'
+    printf 'DISPLAY_DESCRIPTION=DP-3\n'
+  } >"$STATE_DIR/state"
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  unset STUB_STREAM_ACTIVE
+  run_wrapper true
+  eq "layout verification does not change the successful game exit code" "$RC" 0
+  file_has "post-restore layout mismatch is detected" "$LOG" "Desktop layout verification: output 'DP-3' position="
+  file_has "layout verification failure is logged" "$LOG" "DESKTOP_LAYOUT_VERIFY_FAILED"
+  exists "state is kept when the post-restore verification fails" "$STATE_DIR/state"
+}
+
+test_monitor_option_removed() {
   begin
   use_steam_log
   steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  run_wrapper --monitor off true
-  eq "--monitor off exits 0" "$RC" 0
-  file_has "--monitor off sleeps the monitor" "$STUB_STATE_DIR/sleep.log" '^1$'
-  file_has "--monitor off wakes the monitor" "$STUB_STATE_DIR/sleep.log" '^0$'
+  local form
+  for form in "--monitor on" "--monitor off" "--monitor=on" "--monitor=off"; do
+    rm -f "$LOG"
+    : >"$STUB_STATE_DIR/sleep.log"
+    : >"$STUB_STATE_DIR/kscreen.log"
+    # shellcheck disable=SC2086
+    run_wrapper $form true
+    ne "rejected: $form" "$RC" 0
+    file_lacks "no game launch for $form" "$LOG" "GAME_LAUNCH"
+    file_lacks "no stream pipeline for $form" "$LOG" "STREAM_DETECTED"
+    eq "no screen sleep for $form" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+    eq "no kscreen change for $form" "$(cat "$STUB_STATE_DIR/kscreen.log")" ""
+    absent "no state written for $form" "$STATE_DIR/state"
+    cmp_file "modes.cfg untouched by $form" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  done
 }
 
-test_monitor_gamescope_on() {
+test_monitor_forms_are_game_arguments() {
   begin
   use_steam_log
   steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  run_wrapper --monitor on true
-  eq "--monitor on exits 0" "$RC" 0
-  eq "monitor never put to sleep" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
-  file_has "policy applied: on" "$LOG" "MONITOR_POWER_APPLIED on"
-  file_has "target still verified" "$LOG" "Verified target mode: 1920x1200@60"
-  cmp_file "modes.cfg restored" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
+  # After the game command the same tokens are ordinary game arguments: they
+  # are forwarded verbatim and never parsed as wrapper options.
+  run_wrapper bash -c 'printf "%s\n" "$@" > "$0"' "$SANDBOX/game_args" --monitor on
+  eq "a game command carrying --monitor exits 0" "$RC" 0
+  cmp_file "game argv preserved verbatim" "$SANDBOX/game_args" $'--monitor\non'
 }
 
-test_monitor_cli_forms() {
-  begin
-  use_steam_log
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  run_wrapper --monitor=on bash -c 'printf "%s\n" "$@" > "$0"' "$SANDBOX/game_args" --monitor on --foo
-  eq "--monitor=on accepted" "$RC" 0
-  cmp_file "argv preserved (option not forwarded)" "$SANDBOX/game_args" $'--monitor\non\n--foo'
-  rm -f "$LOG"
-  run_wrapper --monitor maybe true
-  ne "invalid --monitor value rejected" "$RC" 0
-  file_has "invalid value logged" "$LOG" "--monitor value must be 'on' or 'off'"
-  rm -f "$LOG"
-  run_wrapper --monitor
-  ne "missing --monitor value rejected" "$RC" 0
-  file_has "missing value logged" "$LOG" "--monitor requires 'on' or 'off'"
-  rm -f "$LOG"
-  run_wrapper --monitor=off true
-  eq "--monitor=off accepted" "$RC" 0
-  file_has "--monitor=off sleeps the monitor" "$STUB_STATE_DIR/sleep.log" '^1$'
-  cmp_file "modes.cfg untouched by rejections" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
-}
-
-test_monitor_gamescope_wake_failure() {
+test_gamescope_wake_failure() {
   begin
   export STUB_WAKE_FAIL=1
   use_steam_log
   steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
   run_wrapper true
   eq "run still exits 0" "$RC" 0
-  file_has "wake failure diagnosed" "$LOG" "CRITICAL: failed to wake the monitor"
+  file_has "wake failure diagnosed" "$LOG" "CRITICAL: failed to restore the physical display"
   cmp_file "modes.cfg restored despite the wake failure" "$MODESF" 'StubMake StubModel:3440x1440@165 0'
 }
 
-test_monitor_desktop_default_off() {
+test_desktop_physical_display_disable() {
   begin
   export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
   export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
@@ -645,6 +658,7 @@ test_monitor_desktop_default_off() {
   file_has "Desktop physical output disabled after virtual output is ready" "$STUB_STATE_DIR/kscreen.log" 'disable DP-3'
   file_has "Desktop physical output re-enabled during cleanup" "$STUB_STATE_DIR/kscreen.log" 'enable DP-3'
   file_has "Desktop virtual display destroyed" "$LOG" "VIRTUAL_DISPLAY_DESTROYED"
+  file_has "Desktop final layout verified" "$LOG" "Verified Desktop layout after restore"
   cmp_file "Desktop original mode restored" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
   cmp_file "Desktop original primary restored" "$STUB_STATE_DIR/kscreen_primary" 'DP-3'
   absent "Desktop virtual display process marker removed" "$STUB_STATE_DIR/virtual_display_present"
@@ -688,7 +702,6 @@ seed_virtual_crash_state() {
     printf 'MODES_BACKUP=%s\n' "$BACKUP"
     printf 'MODES_EXISTED=1\n'
     printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$sleep_requested"
-    printf 'MONITOR_POWER_MODE=off\n'
     printf 'VIRTUAL_DISPLAY_ACTIVE=%s\n' "$unit_active"
     printf 'VIRTUAL_DISPLAY_UNIT=%s\n' "$( (( unit_active )) && printf '%s' "$unit" )"
     printf 'VIRTUAL_DISPLAY_PORT=59100\n'
@@ -797,26 +810,10 @@ test_desktop_virtual_readiness_before_launch() {
 }
 
 
-test_monitor_desktop_on() {
-  begin
-  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_CONNECTOR=DP-3
-  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
-  use_steam_log
-  steam_hint "$STEAM_STREAM_LOG" 1 'Maximum capture: 1920x1200 60.00 FPS'
-  run_wrapper --monitor on true
-  eq "Desktop --monitor on exits 0" "$RC" 0
-  file_lacks "no monitor-off policy applied" "$LOG" "Monitor policy: off"
-  file_lacks "no virtual display created" "$LOG" "VIRTUAL_DISPLAY_CREATED"
-  file_has "target applied on the desktop backend" "$LOG" "OUTPUT_TARGET_REACHED 1920x1200@60"
-  file_lacks "physical output never disabled" "$STUB_STATE_DIR/kscreen.log" 'disable DP-3'
-  file_lacks "no DPMS switch used" "$STUB_STATE_DIR/kscreen.log" 'dpms:off'
-  cmp_file "original mode restored" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
-  cmp_file "original primary restored" "$STUB_STATE_DIR/kscreen_primary" 'DP-3'
-}
 
 
 
-test_monitor_desktop_virtual_display_failure_fails_closed() {
+test_desktop_virtual_display_failure_fails_closed() {
   begin
   export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KRFB_FAIL=1
   export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
@@ -829,7 +826,7 @@ test_monitor_desktop_virtual_display_failure_fails_closed() {
   absent "state cleared after the failed run" "$STATE_DIR/state"
 }
 
-test_monitor_desktop_wake_failure() {
+test_desktop_wake_failure() {
   begin
   export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_FAIL=0
   export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
@@ -843,20 +840,18 @@ test_monitor_desktop_wake_failure() {
   absent "state cleared" "$STATE_DIR/state"
 }
 
-test_monitor_desktop_recovery_wake() {
+test_desktop_recovery_wake() {
   begin
   export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1
   export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
-  # An interrupted Desktop run left the panel DPMS-off at the streamed mode.
+  # An interrupted Desktop run left the physical output out of the layout.
   printf '1920x1200@60\n' >"$STUB_STATE_DIR/kscreen_mode"
-  printf 'off\n' >"$STUB_STATE_DIR/kscreen_dpms"
   {
     printf 'VERSION=1\n'
     printf 'PHASE=STREAMING\n'
     printf 'MODES_BACKUP=%s\n' "$BACKUP"
     printf 'MODES_EXISTED=0\n'
     printf 'SCREEN_SLEEP_REQUESTED=1\n'
-    printf 'MONITOR_POWER_MODE=off\n'
     printf 'XWAYLAND_SYNCED=0\n'
     printf 'DISPLAY_BACKEND=desktop\n'
     printf 'ORIGINAL_CONNECTOR=DP-3\n'
@@ -868,24 +863,88 @@ test_monitor_desktop_recovery_wake() {
   unset STUB_STREAM_ACTIVE
   run_wrapper true
   eq "Desktop recovery exits 0" "$RC" 0
-  file_has "Desktop recovery woke the panel" "$LOG" "MONITOR_POWER_RESTORED on"
-  cmp_file "Desktop panel DPMS back on" "$STUB_STATE_DIR/kscreen_dpms" 'on'
+  file_has "Desktop recovery restored the physical display" "$LOG" "PHYSICAL_DISPLAY_RESTORED"
+  file_has "Desktop recovery re-enabled the physical output" "$STUB_STATE_DIR/kscreen.log" 'enable DP-3'
   cmp_file "Desktop original mode restored" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
   absent "Desktop recovered state cleared" "$STATE_DIR/state"
 }
 
-test_monitor_bypass_no_stream() {
-  local mode
-  for mode in off on; do
-    begin
-    unset STUB_STREAM_ACTIVE
-    printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
-    run_wrapper --monitor "$mode" true
-    eq "bypass with --monitor $mode exits 0" "$RC" 0
-    file_has "bypass logged ($mode)" "$LOG" "bypassing display pipeline"
-    eq "no monitor sleep on bypass ($mode)" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
-    end
-  done
+test_desktop_restore_detects_silent_kscreen_rejection() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1 STUB_KSCREEN_REJECT=1
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  # kscreen-doctor exits 0 while rejecting the request, so the wrapper must not
+  # trust the exit code: a rejected restore has to surface and the stale state
+  # must be kept instead of being silently cleared as if it had worked.
+  printf '1920x1200@60\n' >"$STUB_STATE_DIR/kscreen_mode"
+  {
+    printf 'VERSION=1\n'
+    printf 'PHASE=STREAMING\n'
+    printf 'MODES_BACKUP=%s\n' "$BACKUP"
+    printf 'MODES_EXISTED=0\n'
+    printf 'SCREEN_SLEEP_REQUESTED=0\n'
+    printf 'VIRTUAL_DISPLAY_ACTIVE=0\n'
+    printf 'XWAYLAND_SYNCED=0\n'
+    printf 'DISPLAY_BACKEND=desktop\n'
+    printf 'ORIGINAL_CONNECTOR=DP-3\n'
+    printf 'ORIGINAL_MODEL=DP-3\n'
+    printf 'ORIGINAL_PRIMARY_OUTPUT=DP-3\n'
+    printf 'ORIGINAL_DESKTOP_LAYOUT=DP-3|1|1|1|3440x1440@165.00|0,0|1|1\n'
+    printf 'ORIGINAL_MODE=3440x1440@165\n'
+    printf 'ORIGINAL_XWAYLAND_MODE=\n'
+    printf 'DISPLAY_DESCRIPTION=DP-3\n'
+  } >"$STATE_DIR/state"
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  unset STUB_STREAM_ACTIVE
+  run_wrapper true
+  file_has "the rejected restore is surfaced by the postcondition" "$LOG" "DESKTOP_LAYOUT_VERIFY_FAILED"
+  exists "the stale state is kept when the restore could not be trusted" "$STATE_DIR/state"
+  cmp_file "the output was not silently treated as restored" "$STUB_STATE_DIR/kscreen_mode" '1920x1200@60'
+}
+
+test_desktop_layout_restore_normalizes_snapshot_mode() {
+  begin
+  export STUB_NO_INFO=1 STUB_KSCREEN_AVAILABLE=1
+  export STUB_KSCREEN_MODE_LIST="3440x1440@165 1920x1200@60"
+  # A KScreen snapshot reports the refresh with two decimals ("@165.00").
+  # The restore must normalize it: kscreen-doctor rejects the raw token and
+  # still exits 0, so the mistake would otherwise leave the output unrestored
+  # without any error reaching the wrapper.
+  printf '1920x1200@60\n' >"$STUB_STATE_DIR/kscreen_mode"
+  {
+    printf 'VERSION=1\n'
+    printf 'PHASE=STREAMING\n'
+    printf 'MODES_BACKUP=%s\n' "$BACKUP"
+    printf 'MODES_EXISTED=0\n'
+    printf 'SCREEN_SLEEP_REQUESTED=0\n'
+    printf 'VIRTUAL_DISPLAY_ACTIVE=0\n'
+    printf 'XWAYLAND_SYNCED=0\n'
+    printf 'DISPLAY_BACKEND=desktop\n'
+    printf 'ORIGINAL_CONNECTOR=DP-3\n'
+    printf 'ORIGINAL_PRIMARY_OUTPUT=DP-3\n'
+    printf 'ORIGINAL_DESKTOP_LAYOUT=DP-3|1|1|1|3440x1440@165.00|0,0|1|1\n'
+    printf 'ORIGINAL_MODE=3440x1440@165.00\n'
+    printf 'ORIGINAL_XWAYLAND_MODE=\n'
+    printf 'DISPLAY_DESCRIPTION=DP-3\n'
+  } >"$STATE_DIR/state"
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  unset STUB_STREAM_ACTIVE
+  run_wrapper true
+  eq "raw snapshot recovery exits 0" "$RC" 0
+  cmp_file "snapshot mode restored in normalized form" "$STUB_STATE_DIR/kscreen_mode" '3440x1440@165'
+  cmp_file "original primary restored from the raw layout" "$STUB_STATE_DIR/kscreen_primary" 'DP-3'
+  absent "state cleared after the raw snapshot recovery" "$STATE_DIR/state"
+}
+
+test_bypass_no_stream_no_display_change() {
+  begin
+  unset STUB_STREAM_ACTIVE
+  printf 'STREAM_DETECT_WAIT_SECONDS=1\n' >"$CFG"
+  run_wrapper true
+  eq "a local launch exits 0" "$RC" 0
+  file_has "bypass logged" "$LOG" "bypassing display pipeline"
+  eq "no physical display sleep on bypass" "$(cat "$STUB_STATE_DIR/sleep.log")" ""
+  eq "no kscreen change on bypass" "$(cat "$STUB_STATE_DIR/kscreen.log")" ""
 }
 
 # --- virtual stream display: multi-monitor, capability, crash states ---------
@@ -966,7 +1025,6 @@ test_desktop_virtual_recovery_after_crash() {
     printf 'MODES_BACKUP=%s\n' "$BACKUP"
     printf 'MODES_EXISTED=0\n'
     printf 'SCREEN_SLEEP_REQUESTED=0\n'
-    printf 'MONITOR_POWER_MODE=off\n'
     printf 'VIRTUAL_DISPLAY_ACTIVE=1\n'
     printf 'VIRTUAL_DISPLAY_UNIT=steam-link-virtual-SteamLinkDisplayAdapter.service\n'
     printf 'VIRTUAL_DISPLAY_NAME=SteamLinkDisplayAdapter\n'
@@ -986,6 +1044,7 @@ test_desktop_virtual_recovery_after_crash() {
   eq "crash recovery exits 0" "$RC" 0
   file_has "virtual display torn down" "$LOG" "VIRTUAL_DISPLAY_DESTROYED"
   file_has "layout restored" "$LOG" "Restoring Desktop layout"
+  file_has "final layout verified after crash" "$LOG" "Verified Desktop layout after restore"
   cmp_file "primary restored after crash" "$STUB_STATE_DIR/kscreen_primary" 'DP-3'
   absent "stale virtual output removed" "$STUB_STATE_DIR/virtual_display_present"
   absent "recovered state cleared" "$STATE_DIR/state"
@@ -1528,7 +1587,8 @@ test_help_minimal() {
   eq "help exits 0" "$RC" 0
   file_has "usage printed" "$STDERR" "Usage:"
   file_has "public launch option shown" "$STDERR" "%command%"
-  file_has "monitor option documented" "$STDERR" "--monitor on|off"
+  file_lacks "no --monitor in help" "$STDERR" "--monitor"
+  file_lacks "no monitor policy in help" "$STDERR" "monitor on"
   file_lacks "no --mode in help" "$STDERR" "--mode"
   file_lacks "no WxH in help" "$STDERR" "WxH"
   absent "no state written" "$STATE_DIR/state"
@@ -1723,21 +1783,21 @@ TESTS=(
   desktop_mode_happy_path
   desktop_mode_without_stream_bypasses
   desktop_mode_delayed_stream
-  desktop_mode_apply_failure_fails_closed
   desktop_mode_isolated_from_gamescope
   gamescope_mode_isolated_from_kscreen
   desktop_backend_redetected_after_recovery
-  monitor_gamescope_default_off
-  monitor_gamescope_off_explicit
-  monitor_gamescope_on
-  monitor_cli_forms
-  monitor_gamescope_wake_failure
-  monitor_desktop_default_off
-  monitor_desktop_on
-  monitor_desktop_virtual_display_failure_fails_closed
-  monitor_desktop_wake_failure
-  monitor_desktop_recovery_wake
-  monitor_bypass_no_stream
+  gamescope_physical_display_sleep
+  monitor_option_removed
+  desktop_layout_verification
+  monitor_forms_are_game_arguments
+  gamescope_wake_failure
+  desktop_physical_display_disable
+  desktop_virtual_display_failure_fails_closed
+  desktop_wake_failure
+  desktop_recovery_wake
+  desktop_layout_restore_normalizes_snapshot_mode
+  desktop_restore_detects_silent_kscreen_rejection
+  bypass_no_stream_no_display_change
   desktop_virtual_multi_monitor
   desktop_virtual_geometry_not_on_physical
   desktop_virtual_unit_without_output_fails_closed

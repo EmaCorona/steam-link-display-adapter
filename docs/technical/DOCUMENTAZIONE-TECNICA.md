@@ -1,9 +1,10 @@
 # steam-link-display-adapter
 
 Wrapper di lancio Steam per **Bazzite Game Mode**: durante il gioco la sessione Gamescope rende la
-geometria del client Steam Link — risolta **dinamicamente** dall'hint del client — con monitor fisico
+geometria del client Steam Link — risolta **dinamicamente** dall'hint del client — con display fisico
 spento, e al termine ripristina il **mode originale dell'host** (rilevato a runtime, mai configurato) e
-monitor ON. Il progetto è **host-agnostic**: connettore, mode corrente e geometria Xwayland #1 sono
+il display fisico. Non esiste una policy monitor on/off selezionabile (vedi la sezione dedicata in
+fondo). Il progetto è **host-agnostic**: connettore, mode corrente e geometria Xwayland #1 sono
 scoperti da Gamescope/DRM a ogni sessione.
 
 Implementazione dell'analisi funzionale [`ANALISI-FUNZIONALE.md`](../analysis/ANALISI-FUNZIONALE.md) (copia identica
@@ -188,7 +189,12 @@ specifica vigente e' [`ANALISI-RIMOZIONE-MODALITA-CLI.md`](../analysis/ANALISI-R
 - Parser (`lib/core/cli.sh`): consuma solo `--help` davanti al comando del gioco, inoltra il resto
   verbatim (`GAME_ARGS`). Qualsiasi forma di `--mode` (`--mode auto`, `--mode WxH`, `--mode=WxH`)
   e' un parametro **non supportato** -> uscita non-zero **prima** di qualsiasi modifica (nessun tocco
-  a output, modes.cfg, Xwayland, monitor o stato). `--help` resta read-only.
+  a output, modes.cfg, Xwayland, display o stato). `--help` resta read-only.
+- Le forme `--monitor on|off` e `--monitor=on|off` sono state **rimosse** (2026-10-01): il
+  comportamento e' unico e non selezionabile, quindi anche queste forme sono parametri non supportati
+  -> uscita non-zero **prima** di qualsiasi modifica (verificato dai test `monitor_option_removed` e
+  `monitor_forms_are_game_arguments`, che controllano anche che non venga scritto stato, non venga
+  toccato il display e non parta il gioco).
 - Rimosse le variabili CLI-only (`MODE_SOURCE`, `MODE_SPEC`, `CLI_WIDTH`, `CLI_HEIGHT`) e la funzione
   `resolve_cli_target()`; `resolve_stream_target()` segue direttamente il comportamento standard.
 - `source=cli` non esiste piu': le sorgenti restano `steam_capture_hint`, `fixed`, `fallback`,
@@ -278,7 +284,7 @@ restore; evento dedicato: `HOST_PROFILE_DETECTED connector=... mode=... xwayland
    fallito poteva cancellare `~/.config/gamescope/modes.cfg` (bug riprodotto nei test).
 5. **Wrapper — sleep fail-closed.** `SCREEN_SLEEP_REQUESTED=1` impostato *prima* della chiamata: un
    fallimento di `drm_sleep_external_screen` aborta il lancio e il cleanup tenta comunque il wake
-   (invariante "cleanup ⇒ monitor ON"). Re-poll fallito loggato esplicitamente.
+   (invariante "cleanup ⇒ display fisico ripristinato"). Re-poll fallito loggato esplicitamente.
 6. **Wrapper — precheck.** Aggiunto `require_cmd journalctl` (dipendenza introdotta dall'adattamento H7).
 7. **Restore helper — robustezza.** Default per `MODES_FILE`, `MODE_TIMEOUT_SECONDS`,
    `POLL_INTERVAL_SECONDS`: senza config installata il helper usciva a metà (unbound variable) senza
@@ -389,11 +395,11 @@ Richiede una finestra in Gaming Mode con l'utente presente:
 1. `~/.local/bin/steam-link-display-adapter-verify-environment` → raccolta ambiente (connector, gamescopectl, atomi,
    `STREAM_MODE`, ultime righe `Maximum capture` del log Steam);
 2. connettere il client e lanciare un gioco con la Launch Option → attesi: `CLIENT_HINT <W>x<H>@<FPS>` e
-   `TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint` nel `wrapper.log`, monitor OFF, mode target nel
+   `TARGET_MODE_RESOLVED WxH@R source=steam_capture_hint` nel `wrapper.log`, display fisico spento, mode target nel
    journal (`drm: selecting mode <target>Hz`);
 3. lato Steam: `~/.local/share/Steam/logs/streaming_log.txt` → `setting capture size <target>` e
    `CLIENT: Video rect: <target> at 0,0` coerenti con il target risolto;
-4. uscire dal gioco → monitor ON, mode originale ripristinato, `wrapper.log` con "Verified original mode",
+4. uscire dal gioco → display fisico ripristinato, mode originale ripristinato, `wrapper.log` con "Verified original mode",
    stato pulito;
 5. ripetere con un secondo client di geometria diversa (target ricalcolato) e per R3 (SIGTERM/SIGINT/SIGHUP)
    e stale-state sul campo.
@@ -444,3 +450,27 @@ con `source`); gli entrypoint restano `0755`.
 primitiva di filesystem riutilizzabile: `mkdir`/`mktemp` restano nei moduli che ne hanno la
 responsabilità) e l'entrypoint del report read-only è sottile ma non ha un modulo di dominio dedicato
 oltre a `lib/core/report.sh`.
+
+## Rimozione della policy monitor on/off (2026-10-01)
+
+Il wrapper non espone piu' alcuna scelta sulla sorte del display fisico durante lo streaming: la
+politica `monitor on|off` e' stata rimossa e il comportamento e' **unico e deterministico**.
+
+| | prima | dopo |
+| --- | --- | --- |
+| CLI | `--monitor on\|off` (+ `--monitor=...`) | nessuna opzione; le forme rimosse sono rifiutate |
+| Workflow | `display_backend_apply_monitor_power` con `MONITOR_POWER_MODE` | `display_backend_sleep_physical_display` senza policy |
+| Facade | `case MONITOR_POWER_MODE in on\|off)` | una sola operazione semantica + restore |
+| Desktop | due percorsi (mode fisico / virtual output) | un solo percorso: KWin virtual output |
+| DPMS Desktop | fallback `kscreen-doctor --dpms on\|off` | rimosso (nessun fallback) |
+| State | campo `MONITOR_POWER_MODE` | campo rimosso (i vecchi state lo ignorano) |
+
+Invariati per scelta: `SCREEN_SLEEP_REQUESTED` (responsabilita' di cleanup, non policy), il modello di
+sicurezza del virtual display (`krfb-virtualmonitor`, `PrivateNetwork=yes`, unit systemd utente,
+password per-run, controllo di raggiungibilita' dal network host, fail-closed), la detection Steam
+Link, la risoluzione dinamica, il locking e l'architettura di recovery.
+
+Comportamento risultante: Game Mode sincronizza Xwayland #1, verifica il target e mette in sleep il
+display fisico; Desktop Mode crea sempre il virtual output KWin alla geometria del client, lo rende
+primary e disabilita l'output fisico. In entrambi i casi il restore rimette l'host com'era e, senza
+stream attivo, non viene toccato nulla.

@@ -44,7 +44,6 @@ XWAYLAND_SYNC_CONFIRMED_NS=0
 MODES_EXISTED=${MODES_EXISTED:-0}
 SETUP_DONE=0
 SCREEN_SLEEP_REQUESTED=0
-MONITOR_POWER_MODE=${MONITOR_POWER_MODE:-off}
 CLEANUP_DONE=0
 GAME_EXIT_CODE=0
 BACKUP_TAKEN=0
@@ -357,7 +356,7 @@ sl_wrapper_main() {
         resolve_stream_target || exit 1
         precheck
         display_backend_prepare_stream
-        display_backend_apply_monitor_power || exit 1
+        display_backend_sleep_physical_display || exit 1
         if ! run_game "${GAME_ARGS[@]}"; then
             exit 1
         fi

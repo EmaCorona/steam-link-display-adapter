@@ -18,7 +18,7 @@ done
 [[ -n "$name" && -n "$resolution" ]] || exit 2
 
 cleanup() {
-    rm -f "$SD/virtual_display_present" "$SD/virtual_display_name" "$SD/virtual_display_resolution"
+    rm -f "$SD/virtual_display_present" "$SD/virtual_display_name" "$SD/virtual_display_resolution" "$SD/virtual_display_primary"
     exit 0
 }
 trap cleanup TERM INT

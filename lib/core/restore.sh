@@ -33,7 +33,7 @@ sl_restore_main() {
     original_xwl=$(original_xwayland_mode_for_restore)
 
     if [[ "${SCREEN_SLEEP_REQUESTED:-0}" == 1 ]]; then
-        display_backend_restore_monitor_power || true
+        display_backend_restore_physical_display || true
         printf '[%s] restore: monitor wake requested\n' "$(date '+%Y-%m-%d %H:%M:%S')"
     fi
 

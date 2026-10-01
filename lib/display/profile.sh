@@ -79,17 +79,22 @@ original_mode_for_restore() {
     # saved by an interrupted run (spec §16), or the legacy configuration for
     # state files written by older builds (spec §17). Empty when unknown:
     # never invent a mode.
+    local mode=''
     if [[ -n "${HOST_ORIGINAL_MODE:-}" ]]; then
-        printf '%s\n' "$HOST_ORIGINAL_MODE"
-        return 0
+        mode=$HOST_ORIGINAL_MODE
+    else
+        mode=$(state_field ORIGINAL_MODE 2>/dev/null || true)
+        if [[ -z "$mode" ]]; then
+            legacy_local_mode || true
+            return 0
+        fi
     fi
-    local from_state
-    from_state=$(state_field ORIGINAL_MODE 2>/dev/null || true)
-    if [[ -n "$from_state" ]]; then
-        printf '%s\n' "$from_state"
-        return 0
-    fi
-    legacy_local_mode || true
+    # A raw KScreen capture (or a state written by an older build) can carry the
+    # refresh with decimals ("3440x1440@165.00"). Normalize once here so the
+    # advertised-mode check, the kscreen-doctor argument and the restore
+    # verification all compare the same form; kscreen-doctor rejects the raw
+    # token and still exits 0, which would make the failure silent.
+    _desktop_normalize_mode "$mode" 2>/dev/null || printf '%s\n' "$mode"
     return 0
 }
 

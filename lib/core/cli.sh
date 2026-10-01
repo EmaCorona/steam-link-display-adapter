@@ -10,23 +10,23 @@
 # unchanged.
 #
 # A missing game command, an invalid option value, an unsupported option
-# (including the removed --mode forms) or an unknown option aborts before any
-# display or state change (fail-closed).
+# (including the removed --mode and --monitor forms) or an unknown option
+# aborts before any display or state change (fail-closed).
 
 GAME_ARGS=()
-MONITOR_POWER_MODE='off'
 
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  steam-link-display-adapter [--monitor on|off] %command%
+  steam-link-display-adapter %command%
 
 Options:
-  --monitor on|off   Keep the monitor on, or turn it off during an active
-                     Steam Link stream. Default: off.
   --help             Show this help.
 
-The wrapper forwards the game command unchanged. The streaming target is
+The wrapper forwards the game command unchanged. During an active Steam Link
+stream the physical display is always removed from the local layout (Gamescope
+sleep, Desktop physical output disable) and the original state is restored
+afterwards: there is no selectable monitor policy. The streaming target is
 resolved automatically from the Steam Link client and the host capabilities.
 EOF
 }
@@ -36,26 +36,6 @@ parse_wrapper_args() {
         case "$1" in
             --help)
                 usage; exit 0 ;;
-            --monitor)
-                shift
-                if (( $# == 0 )); then
-                    fail "--monitor requires 'on' or 'off'"
-                    exit 64
-                fi
-                case "$1" in
-                    on|off) MONITOR_POWER_MODE=$1 ;;
-                    *) fail "--monitor value must be 'on' or 'off'"; exit 64 ;;
-                esac
-                shift
-                ;;
-            --monitor=*)
-                value=${1#*=}
-                case "$value" in
-                    on|off) MONITOR_POWER_MODE=$value ;;
-                    *) fail "--monitor value must be 'on' or 'off'"; exit 64 ;;
-                esac
-                shift
-                ;;
             --)
                 shift; break ;;
             --mode|--mode=*)

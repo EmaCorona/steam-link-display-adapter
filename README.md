@@ -3,18 +3,27 @@
 > Dynamic display adaptation for Steam Remote Play on Bazzite Game Mode and KDE Plasma Desktop Mode.
 
 Steam Link can request a different resolution and aspect ratio than the host's physical display.
+This can cause the host and the stream to use different capture geometries, especially when streaming
+from an ultrawide or another display with a different aspect ratio.
 
-The adapter is **host-agnostic**: the active display backend, its connector, current mode and
-available modes are discovered **at runtime**. Game Mode uses Gamescope; Desktop Mode uses KDE/KScreen.
-The host display does not need to be configured. The client resolution comes from Steam Remote Play;
-the host capabilities come from the backend that is active at runtime.
+The adapter solves this by temporarily adapting the host **only while a Steam Link session is active**.
+It detects the client capture resolution automatically, selects the appropriate host target, prepares
+the display for streaming and removes the physical display from the local presentation path so Steam
+can capture the correct geometry.
 
-This wrapper temporarily adapts the active display backend to the Steam Link client's resolution and
-restores the original host state when the session ends. In Game Mode it also synchronizes Xwayland #1
-and can sleep the physical display. Desktop Mode uses KDE/KScreen without Gamescope or Xwayland:
-with the monitor kept on it changes the physical output mode, while with the default monitor-off policy
-it creates a dedicated KWin virtual output at the client geometry, routes the stream through it and
-temporarily disables the physical output.
+In **Game Mode**, Gamescope is switched to the resolved client-compatible mode, the game's Xwayland #1
+server is synchronized to the same geometry and the physical monitor is put to sleep for the duration
+of the stream. In **Desktop Mode**, the adapter creates a dedicated KWin virtual output at the exact
+client geometry, makes it the streaming output and temporarily disables the physical output instead.
+This avoids changing the user's physical monitor to a mode that may not match the client.
+
+When the game/stream ends, the adapter restores the original host state — including the physical display,
+its mode and layout, and the Game Mode Xwayland #1 geometry when applicable. When no Steam Link session
+is detected, the adapter leaves the display untouched and launches the game normally.
+
+The entire process is automatic: the client resolution is discovered from Steam Remote Play, the host
+capabilities are discovered at runtime from Gamescope/DRM or KDE/KScreen, and the original state is saved
+before any modification.
 
 **No root, no changes to Steam, Proton, Wine or DXVK/VKD3D: it is a per-game Launch Option.**
 
@@ -43,18 +52,19 @@ steam-link-display-adapter
         ↓
 
 temporary host adaptation
-    physical output → best compatible host mode
-    virtual output  → exact client geometry
+    detect client resolution automatically
+    adapt the streaming geometry
+    remove the physical display from the local path
 
         ↓
 
 Steam capture
-    matches client
+    matches the client geometry
 
         ↓
 
 session ends
-    original host state restored
+    physical display and original host state restored
 ```
 
 The same flow works with any supported host display — for example a `3440×1440` ultrawide, a
@@ -104,9 +114,9 @@ host-compatible target
 ```
 
 For physical outputs, the resolver weighs aspect ratio, resolution, refresh rate, pixel difference and
-the client framerate against the modes advertised by the active display backend. Desktop monitor-off
-sessions use a virtual output created at the requested client geometry, so the target resolution does
-not need to exist in the physical monitor's mode list.
+the client framerate against the modes advertised by the active display backend. Desktop sessions use
+a virtual output created at the requested client geometry, so the target resolution does not need to
+exist in the physical monitor's mode list.
 
 
 ### Race-condition handling
@@ -177,7 +187,7 @@ Deliberately conservative:
 ```text
 target not verified
         ↓
-no display sleep
+no physical display change
 no game launch
 ```
 
@@ -246,18 +256,18 @@ Steam Remote Play / Steam Link
 gamescopectl (Game Mode)
 xprop / xdpyinfo (Game Mode)
 kscreen-doctor (Desktop Mode)
-krfb-virtualmonitor (Desktop Mode, monitor off)
-systemd-run / systemctl (Desktop Mode, monitor off)
+krfb-virtualmonitor (Desktop Mode)
+systemd-run / systemctl (Desktop Mode)
 journalctl (Game Mode)
 pactl / pw-cli
 flock
 ```
 
 For physical-output sessions, the target mode must exist in the mode set advertised by the active
-display backend: in Game Mode, the candidates come from Gamescope/DRM; in Desktop Mode with the
-monitor kept on, the active KDE output and its advertised modes come from `kscreen-doctor`. With
-Desktop Mode monitor off, the virtual stream output is created at the resolved client geometry, so
-that geometry is not required to be present in the physical output's mode list.
+display backend: in Game Mode, the candidates come from Gamescope/DRM. In Desktop Mode the virtual
+stream output is created at the resolved client geometry, so that geometry is not required to be
+present in the physical output's mode list; the active KDE output and its advertised modes are read
+from `kscreen-doctor` for profiling and restore.
 
 Read-only check for a DRM connector — replace `HDMI-A-1` with the
 connector reported by `steam-link-display-adapter-verify-environment`:
@@ -291,11 +301,8 @@ Target display mode
         │     └── Xwayland #1
         │
         └── Desktop Mode
-              ├── KDE/KScreen physical output
-              │     (monitor on)
-              │
               └── KWin virtual stream output
-                    (monitor off)
+                    (physical output disabled)
                         │
                         ▼
                      Game launch
@@ -322,7 +329,7 @@ Steam Link inactive
 
 In both Desktop Mode and Game Mode, when no stream is active after the bounded detection window, the
 display is left untouched and the game is launched normally. The display pipeline is activated only
-after the Steam Link session is confirmed, and Desktop monitor-off mode is not considered ready until
+after the Steam Link session is confirmed, and Desktop Mode is not considered ready until
 the virtual KWin output has been created and exposed through KScreen.
 
 ## Launch Option
@@ -337,19 +344,16 @@ The Launch Option only activates the adapter: the target is resolved dynamically
 client against the modes the host really advertises. The display target is never chosen from the
 command line.
 
-The monitor during an active stream is chosen per game, in the same Launch Option:
+The monitor behaviour is not configurable: every game uses the same display policy.
 
 ```text
-steam-link-display-adapter %command%               → monitor OFF (default)
-steam-link-display-adapter --monitor off %command% → monitor OFF
-steam-link-display-adapter --monitor on %command%  → monitor ON
+Game Mode    → sleep the physical display
+Desktop Mode → create a dedicated KWin virtual output at the resolved stream geometry, make it the
+               primary output for the session and disable the physical output
 ```
 
-The behaviour is identical at the policy level in Game Mode and Desktop Mode: Game Mode sleeps the
-physical display; Desktop Mode with monitor off creates a dedicated KWin virtual output at the resolved
-stream geometry, makes it the primary output for the session and disables the physical output. Desktop
-Mode with monitor on keeps the physical output attached and changes its KDE/KScreen mode normally.
-Outside an active Steam Link session the monitor and display layout are never touched.
+Outside an active Steam Link session the monitor and display layout are never touched. The removed
+`--monitor on|off` forms are rejected before any display or state change.
 
 
 ## Dynamic resolution
@@ -359,18 +363,18 @@ The target is recomputed for every session against the modes the host really adv
 ```text
 Client A (16:10) on a 3440×1440 host
    ↓
-Desktop monitor off → 1920×1200 virtual output
-Physical-output session → best compatible host mode
+Desktop Mode → 1920×1200 virtual output
+Game Mode    → best compatible host mode
 
 Client B (16:9) on a 2560×1440 host
    ↓
-Desktop monitor off → 1920×1080 virtual output
-Physical-output session → best compatible host mode
+Desktop Mode → 1920×1080 virtual output
+Game Mode    → best compatible host mode
 
 Client C (16:10) on a 3840×2160 host
    ↓
-Desktop monitor off → requested client geometry
-Physical-output session → best compatible host mode
+Desktop Mode → requested client geometry
+Game Mode    → best compatible host mode
 
 No client hint available
    ↓
@@ -390,8 +394,7 @@ Verify target
 Prepare backend
  ├─ Game Mode → sync Xwayland #1 → sleep physical display
  └─ Desktop Mode
-       ├─ monitor on  → apply physical KScreen mode
-       └─ monitor off → create isolated virtual output → make primary → disable physical output
+       └─ create isolated virtual output → make primary → disable physical output
  ↓
 Launch game
 ```
@@ -411,11 +414,7 @@ Game Mode
 → sleep the physical display only after the target is verified
 → restore the display on cleanup
 
-Desktop Mode, monitor on
-→ change only the KDE physical output mode
-→ restore the original mode on cleanup
-
-Desktop Mode, monitor off
+Desktop Mode
 → create an isolated KWin virtual stream output
 → select it for the streaming session
 → disable the physical output only after the virtual output is ready
@@ -448,12 +447,11 @@ The complete list of options is in
 [`config/steam-link-display-adapter.conf.example`](config/steam-link-display-adapter.conf.example).
 An existing user configuration is never overwritten by the installer.
 
-Desktop monitor-off mode requires `krfb-virtualmonitor` and a user systemd environment capable of
-running it with `PrivateNetwork=yes`. The virtual display gets a random per-run VNC password and a
+Desktop Mode's virtual stream path requires `krfb-virtualmonitor` and a user systemd environment
+capable of running it with `PrivateNetwork=yes`. The virtual display gets a random per-run VNC password and a
 free local port; neither is persisted in the run state or written to the log. The adapter verifies that
 the virtual KWin output appears before making it primary or disabling the physical output, and it fails
-closed when the required network isolation cannot be established. It never falls back to an exposed VNC
-listener or to DPMS-only monitor control.
+closed when the required network isolation cannot be established. It never falls back to an exposed VNC listener, to DPMS or to a physical-mode change.
 
 ## Diagnostics
 
@@ -509,14 +507,14 @@ docs/technical/    implementation details, measurements and deviations
   can be detected.
 - The client hint is read once, before preparing the session, and only if it is recent (default 10 s):
   the target does not change while a stream is already running.
-- For physical-output sessions, if the client mode does not exist on the host, the resolver picks an
-  aspect-compatible mode (or the configured fallback), never an arbitrary one. Desktop monitor-off
-  sessions are different: the virtual output is created at the resolved client geometry and is not
-  constrained by the physical monitor's advertised modes.
+- In Game Mode, if the client mode does not exist on the host, the resolver picks an
+  aspect-compatible mode (or the configured fallback), never an arbitrary one. Desktop Mode is
+  different: the virtual output is created at the resolved client geometry and is not constrained by
+  the physical monitor's advertised modes.
 - Without a usable client hint, `auto` targets the original host mode/geometry (host-safe fallback)
   instead of a configured value.
-- Desktop monitor-off mode depends on `krfb-virtualmonitor` and user-systemd network isolation;
-  when either requirement is unavailable, the adapter refuses the monitor-off path rather than
+- Desktop Mode depends on `krfb-virtualmonitor` and user-systemd network isolation;
+  when either requirement is unavailable, the adapter refuses the Desktop stream path rather than
   exposing its VNC listener or silently falling back to another power-control mechanism. The virtual
   output must be created and visible in KScreen before the physical output is disabled.
 - No cleanup after `SIGKILL`, panic or power loss: the leftover state is recovered at the next launch.

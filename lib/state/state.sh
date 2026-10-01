@@ -17,7 +17,6 @@ state_write() {
         printf 'MODES_BACKUP=%s\n' "$MODES_BACKUP"
         printf 'MODES_EXISTED=%s\n' "$MODES_EXISTED"
         printf 'SCREEN_SLEEP_REQUESTED=%s\n' "$SCREEN_SLEEP_REQUESTED"
-        printf 'MONITOR_POWER_MODE=%s\n' "${MONITOR_POWER_MODE:-off}"
         printf 'VIRTUAL_DISPLAY_ACTIVE=%s\n' "${VIRTUAL_DISPLAY_ACTIVE:-0}"
         printf 'VIRTUAL_DISPLAY_UNIT=%s\n' "${VIRTUAL_DISPLAY_UNIT:-}"
         printf 'VIRTUAL_DISPLAY_PORT=%s\n' "${VIRTUAL_DISPLAY_PORT:-}"

@@ -82,5 +82,6 @@ MODES_FILE="$HOME/.config/gamescope/modes.cfg"
 # The target is resolved automatically: STREAM_MODE (below) selects the internal
 # behaviour and is never chosen from the command line. Run
 # `steam-link-display-adapter --help` for the public usage.
-# The monitor power policy is a per-game Launch Option as well
-# (`--monitor on|off`, default `off`); it is never a configuration setting.
+# Display handling is not user-selectable: Game Mode sleeps the physical display;
+# Desktop Mode uses an isolated KWin virtual output and disables the physical
+# output for the stream. No `--monitor` Launch Option exists.

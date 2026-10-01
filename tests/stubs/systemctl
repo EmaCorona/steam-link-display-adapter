@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Deterministic test stub for `systemctl --user`.
+#
+# Only the minimal surface used by the wrapper: is-system-running, is-active,
+# stop. Units are PID files under $STUB_STATE_DIR/units (created by the
+# systemd-run stub), so stopping a unit never touches the real user manager and
+# can never signal a recycled PID.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+mkdir -p "$SD/units"
+
+[[ "${1:-}" == "--user" ]] && shift
+
+case "${1:-}" in
+    is-system-running)
+        # -1/offline/unknown are the states that make the wrapper refuse the
+        # isolation; allow the test to force them.
+        printf '%s\n' "${STUB_SYSTEMD_STATE:-running}"
+        exit 0
+        ;;
+    is-active)
+        shift
+        quiet=0
+        [[ "${1:-}" == "--quiet" ]] && { quiet=1; shift; }
+        unit=${1:-}
+        pid=$(cat "$SD/units/$unit" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            (( quiet )) || printf 'active\n'
+            exit 0
+        fi
+        rm -f "$SD/units/$unit"
+        (( quiet )) || printf 'inactive\n'
+        exit 3
+        ;;
+    stop)
+        shift
+        unit=${1:-}
+        pid=$(cat "$SD/units/$unit" 2>/dev/null || true)
+        if [[ -n "$pid" ]]; then kill -TERM "$pid" 2>/dev/null || true; fi
+        rm -f "$SD/units/$unit"
+        exit 0
+        ;;
+    show)
+        exit 0
+        ;;
+esac
+exit 0

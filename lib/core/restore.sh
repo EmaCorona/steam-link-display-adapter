@@ -19,6 +19,10 @@ sl_restore_main() {
         [[ -n "$state_backup" ]] && MODES_BACKUP=$state_backup
         MODES_EXISTED=$(sed -n 's/^MODES_EXISTED=//p' "$STATE_FILE" | head -n1 || printf '0')
         state_xwayland_synced=$(sed -n 's/^XWAYLAND_SYNCED=//p' "$STATE_FILE" | head -n1 || printf '0')
+        saved_backend=$(sed -n 's/^DISPLAY_BACKEND=//p' "$STATE_FILE" | head -n1 || true)
+        saved_sleep=$(sed -n 's/^SCREEN_SLEEP_REQUESTED=//p' "$STATE_FILE" | head -n1 || printf '0')
+        [[ -n "$saved_backend" ]] && DISPLAY_BACKEND=$saved_backend
+        SCREEN_SLEEP_REQUESTED=$saved_sleep
     fi
 
     # Original display state: the profile saved by the interrupted run when
@@ -28,8 +32,10 @@ sl_restore_main() {
     original_mode=$(original_mode_for_restore)
     original_xwl=$(original_xwayland_mode_for_restore)
 
-    screen_wake || true
-    printf '[%s] restore: screen wake requested\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    if [[ "${SCREEN_SLEEP_REQUESTED:-0}" == 1 ]]; then
+        display_backend_restore_monitor_power || true
+        printf '[%s] restore: monitor wake requested\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    fi
 
     if [[ -n "$MODES_BACKUP" && -f "$MODES_BACKUP" ]]; then
         if (( MODES_EXISTED )); then

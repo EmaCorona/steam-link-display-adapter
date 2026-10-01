@@ -44,6 +44,25 @@ display_backend_supports_xwayland() {
     [[ "${DISPLAY_BACKEND:-}" == gamescope ]]
 }
 
+display_backend_requires_host_mode() {
+    # True when the stream geometry must exist among the host display modes.
+    # The Desktop virtual output is created at the requested geometry, so it is
+    # independent of the physical mode set (spec: resolution model).
+    if display_backend_is desktop && desktop_virtual_mode_selected; then
+        return 1
+    fi
+    return 0
+}
+
+display_backend_mode_supported() {
+    local mode=$1
+    if display_backend_requires_host_mode; then
+        mode_list_contains "$mode"
+        return
+    fi
+    [[ "$mode" =~ ^[0-9]+x[0-9]+@[0-9]+$ ]]
+}
+
 display_backend_precheck() {
     case "${DISPLAY_BACKEND:-}" in
         gamescope)
@@ -76,18 +95,78 @@ display_backend_prepare_stream() {
     esac
 }
 
-display_backend_restore_host_state() {
-    case "${DISPLAY_BACKEND:-}" in
-        gamescope) gamescope_restore_host_state ;;
-        desktop) desktop_restore_host_state ;;
-        *) fail "no display backend selected"; return 1 ;;
+display_backend_apply_monitor_power() {
+    local phase
+    phase=$(state_phase 2>/dev/null || printf 'STREAMING')
+
+    case "${MONITOR_POWER_MODE:-off}" in
+        off)
+            # Persist the intent before issuing the power-off request. If the
+            # process is interrupted immediately after this point, the next
+            # invocation can conservatively wake the display during recovery.
+            SCREEN_SLEEP_REQUESTED=1
+            state_write "${phase:-STREAMING}"
+            log "Monitor policy: off (backend=$(display_backend_name))"
+            if ! screen_sleep; then
+                fail "failed to turn the monitor off during Steam Link streaming"
+                return 1
+            fi
+            log_event MONITOR_POWER_APPLIED off
+            log "Monitor turned off for Steam Link streaming"
+            ;;
+        on)
+            SCREEN_SLEEP_REQUESTED=0
+            state_write "${phase:-STREAMING}"
+            log_event MONITOR_POWER_APPLIED on
+            log "Monitor kept on for Steam Link streaming"
+            ;;
+        *)
+            fail "invalid monitor power mode: ${MONITOR_POWER_MODE:-}"
+            return 1
+            ;;
     esac
 }
 
-display_backend_recover_stale_state() {
+display_backend_restore_monitor_power() {
+    if (( ! SCREEN_SLEEP_REQUESTED )); then
+        return 0
+    fi
+
+    if screen_wake; then
+        SCREEN_SLEEP_REQUESTED=0
+        log_event MONITOR_POWER_RESTORED on
+        log "Monitor wake requested during cleanup/recovery"
+        return 0
+    fi
+
+    log "CRITICAL: failed to wake the monitor during cleanup/recovery"
+    return 1
+}
+
+display_backend_restore_host_state() {
+    local rc=0
+    if ! display_backend_restore_monitor_power; then
+        rc=1
+    fi
+
     case "${DISPLAY_BACKEND:-}" in
-        gamescope) gamescope_recover_stale_state ;;
-        desktop) desktop_recover_stale_state ;;
+        gamescope) gamescope_restore_host_state || rc=1 ;;
+        desktop) desktop_restore_host_state || rc=1 ;;
         *) fail "no display backend selected"; return 1 ;;
     esac
+    return "$rc"
+}
+
+display_backend_recover_stale_state() {
+    local rc=0
+    if ! display_backend_restore_monitor_power; then
+        rc=1
+    fi
+
+    case "${DISPLAY_BACKEND:-}" in
+        gamescope) gamescope_recover_stale_state || rc=1 ;;
+        desktop) desktop_recover_stale_state || rc=1 ;;
+        *) fail "no display backend selected"; return 1 ;;
+    esac
+    return "$rc"
 }

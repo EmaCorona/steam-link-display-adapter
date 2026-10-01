@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Deterministic test stub for krfb-virtualmonitor.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+
+name=
+resolution=
+while (( $# > 0 )); do
+    case "$1" in
+        --name) name=${2:-}; shift 2 ;;
+        --resolution) resolution=${2:-}; shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+[[ "${STUB_KRFB_FAIL:-0}" == 1 ]] && exit 9
+
+[[ -n "$name" && -n "$resolution" ]] || exit 2
+
+cleanup() {
+    rm -f "$SD/virtual_display_present" "$SD/virtual_display_name" "$SD/virtual_display_resolution"
+    exit 0
+}
+trap cleanup TERM INT
+
+# Bounded lifetime: an interrupted test run must never leave an orphan process
+# behind (and, in production terms, the real payload is stopped by its unit).
+deadline=$((SECONDS + ${STUB_KRFB_LIFETIME:-120}))
+
+if [[ "${STUB_KRFB_NO_OUTPUT:-0}" == 1 ]]; then
+    # the unit starts but the compositor never publishes the output
+    while (( SECONDS < deadline )); do sleep 1; done
+    exit 0
+fi
+
+printf '%s\n' "$name" >"$SD/virtual_display_name"
+printf '%s\n' "$resolution" >"$SD/virtual_display_resolution"
+: >"$SD/virtual_display_present"
+
+while (( SECONDS < deadline )); do
+    sleep 1
+done
+cleanup

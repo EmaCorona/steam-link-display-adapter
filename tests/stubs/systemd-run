@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Deterministic test stub for `systemd-run --user`.
+#
+# It never touches the real user manager: the payload runs as a local child and
+# the "unit" is tracked as a PID file under $STUB_STATE_DIR/units. `--wait
+# --pipe` runs the payload inline (used by the isolation probe); with
+# PrivateNetwork=yes the probe namespace exposes only `lo`.
+set -u
+SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
+mkdir -p "$SD/units"
+
+unit=
+privnet=0
+wait_mode=0
+while (( $# > 0 )); do
+    case "$1" in
+        --user|--quiet|--collect|--pipe) shift ;;
+        --wait) wait_mode=1; shift ;;
+        --unit) unit=${2:-}; shift 2 ;;
+        --unit=*) unit=${1#--unit=}; shift ;;
+        -p|--property)
+            [[ "${2:-}" == PrivateNetwork=yes ]] && privnet=1
+            shift 2 ;;
+        -p*) [[ "${1#-p}" == PrivateNetwork=yes ]] && privnet=1; shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
+if (( wait_mode )); then
+    if (( privnet )); then printf '%s\n' lo; else printf '%s\n' lo enp8s0; fi
+    exit 0
+fi
+
+[[ -n "$unit" ]] || exit 2
+cmd=$(printf '%s' "$*" | sed -E 's/--password [^ ]+/--password <redacted>/g')
+printf 'unit=%s privnet=%s cmd=%s\n' "$unit" "$privnet" "$cmd" >>"$SD/systemd-run.log"
+
+( "$@" >/dev/null 2>&1 ) &
+printf '%s\n' "$!" >"$SD/units/$unit"
+exit 0

@@ -44,6 +44,7 @@ XWAYLAND_SYNC_CONFIRMED_NS=0
 MODES_EXISTED=${MODES_EXISTED:-0}
 SETUP_DONE=0
 SCREEN_SLEEP_REQUESTED=0
+MONITOR_POWER_MODE=${MONITOR_POWER_MODE:-off}
 CLEANUP_DONE=0
 GAME_EXIT_CODE=0
 BACKUP_TAKEN=0
@@ -66,7 +67,14 @@ TARGET_MODE_SPEC=''
 # in the state file, authoritative for the restore.
 HOST_CONNECTOR=''
 HOST_DESCRIPTION=''
+HOST_ORIGINAL_PRIMARY=''
+HOST_ORIGINAL_LAYOUT=''
 HOST_ORIGINAL_MODE=''
+VIRTUAL_DISPLAY_ACTIVE=0
+VIRTUAL_DISPLAY_UNIT=''
+VIRTUAL_DISPLAY_NAME=''
+VIRTUAL_DISPLAY_OUTPUT=''
+VIRTUAL_DISPLAY_PORT=''
 HOST_ORIGINAL_XWAYLAND_MODE=''
 
 cleanup() {
@@ -102,6 +110,14 @@ recover_stale_state() {
     log "Stale state detected: $previous"
     log "Running conservative recovery before starting new game"
     STALE_STATE_LOADED=1
+
+    local saved_sleep
+    saved_sleep=$(state_field SCREEN_SLEEP_REQUESTED 2>/dev/null || printf '0')
+    if [[ "$saved_sleep" == 1 ]]; then
+        SCREEN_SLEEP_REQUESTED=1
+    else
+        SCREEN_SLEEP_REQUESTED=0
+    fi
 
     saved_backend=$(state_field DISPLAY_BACKEND 2>/dev/null || true)
     if [[ -n "$saved_backend" ]]; then
@@ -174,6 +190,21 @@ resolve_stream_target() {
     # Dynamic path (STREAM_MODE=auto, the default).
     if hint=$(get_latest_stream_capture_hint); then
         read -r CLIENT_WIDTH CLIENT_HEIGHT CLIENT_FPS <<<"$hint" || true
+        if ! display_backend_requires_host_mode; then
+            # The stream geometry is created by the backend (Desktop virtual
+            # output), so it must not be constrained by the physical mode set.
+            TARGET_WIDTH=$CLIENT_WIDTH
+            TARGET_HEIGHT=$CLIENT_HEIGHT
+            TARGET_REFRESH=${CLIENT_FPS%%.*}
+            [[ -n "$TARGET_REFRESH" ]] || TARGET_REFRESH=$STREAM_REFRESH
+            TARGET_FPS=$CLIENT_FPS
+            TARGET_SOURCE=steam_capture_hint
+            TARGET_MODE_SPEC=auto
+            log "Client hint ${CLIENT_WIDTH}x${CLIENT_HEIGHT}@${CLIENT_FPS} -> target ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} (backend-provided geometry)"
+            log "TARGET_MODE=${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
+            log_event TARGET_MODE_RESOLVED "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH} source=steam_capture_hint"
+            return 0
+        fi
         if resolved=$(resolve_target_mode "$CLIENT_WIDTH" "$CLIENT_HEIGHT" "$CLIENT_FPS"); then
             read -r TARGET_WIDTH TARGET_HEIGHT TARGET_REFRESH <<<"$resolved" || true
             [[ -n "$TARGET_REFRESH" ]] || TARGET_REFRESH=$STREAM_REFRESH
@@ -232,7 +263,7 @@ precheck() {
         return 1
     }
 
-    mode_list_contains "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}" || {
+    display_backend_mode_supported "${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}" || {
         fail "$(display_backend_name) does not currently advertise ${TARGET_WIDTH}x${TARGET_HEIGHT}@${TARGET_REFRESH}"
         return 1
     }
@@ -326,6 +357,7 @@ sl_wrapper_main() {
         resolve_stream_target || exit 1
         precheck
         display_backend_prepare_stream
+        display_backend_apply_monitor_power || exit 1
         if ! run_game "${GAME_ARGS[@]}"; then
             exit 1
         fi

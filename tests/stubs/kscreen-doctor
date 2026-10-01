@@ -1,43 +1,219 @@
 #!/usr/bin/env bash
 # Test stub for KDE kscreen-doctor.
+#
+# Models what the wrapper relies on:
+#   * multiple outputs (physical + virtual) with mode, position, scale,
+#     rotation, priority, enabled and primary;
+#   * the atomic multi-setting form `output.<c>.<k>[.<v>] ...` (kscreen-doctor
+#     applies every setting in one invocation);
+#   * `-o/--outputs` reporting and `--dpms show|on|off`;
+#   * failure injection (STUB_KSCREEN_FAIL, STUB_KSCREEN_DPMS_FAIL).
+#
+# Outputs are stored as one line each:
+#   n|connector|mode|position|scale|rotation|priority|enabled|primary|connected
 set -u
 SD=${STUB_STATE_DIR:?STUB_STATE_DIR not set}
-
 [[ "${STUB_KSCREEN_AVAILABLE:-0}" == 1 ]] || exit 127
 
-connector=${STUB_KSCREEN_CONNECTOR:-DP-3}
-modes=${STUB_KSCREEN_MODE_LIST:-3440x1440@165 1920x1200@60}
-current=$(cat "$SD/kscreen_mode" 2>/dev/null || printf '%s' "${STUB_KSCREEN_CURRENT_MODE:-3440x1440@165}")
+OUT="$SD/kscreen_outputs"
+LOG="$SD/kscreen.log"
 
-if [[ "${1:-}" == "-o" || "${1:-}" == "--outputs" ]]; then
-    printf 'Output: 1 %s\n' "$connector"
-    printf '    enabled\n'
-    printf '    connected\n'
-    printf '    priority 1\n'
-    printf '    DisplayPort\n'
-    printf '    Modes:'
-    i=1
-    for mode in $modes; do
-        marker=
-        [[ "$mode" == "$current" ]] && marker='*'
-        printf ' %s:%s%s' "$i" "$mode" "$marker"
-        i=$((i + 1))
+_mode_list() {
+    # one mode per line
+    local m
+    for m in ${STUB_KSCREEN_MODE_LIST:-3440x1440@165 1920x1200@60}; do printf '%s\n' "$m"; done
+}
+
+_init() {
+    [[ -f "$OUT" ]] && return 0
+    if [[ "${STUB_KSCREEN_EMPTY:-0}" == 1 ]]; then
+        : >"$OUT"; return 0
+    fi
+    local conn=${STUB_KSCREEN_CONNECTOR:-DP-3}
+    # kscreen_mode stays the plain "current mode" marker used by the harness
+    local mode
+    mode=$(cat "$SD/kscreen_mode" 2>/dev/null || printf '%s' "${STUB_KSCREEN_CURRENT_MODE:-3440x1440@165}")
+    printf '1|%s|%s|0,0|1|1|1|1|1|1\n' "$conn" "$mode" >"$OUT"
+    # STUB_KSCREEN_EXTRA: 'conn|mode|pos|scale|rot|prio|enabled|primary;...'
+    local idx=1 spec
+    for spec in ${STUB_KSCREEN_EXTRA:-}; do
+        idx=$((idx + 1))
+        IFS='|' read -r conn mode pos scale rot prio enabled primary <<<"$spec"
+        [[ -n "$conn" ]] || continue
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|1\n' \
+            "$idx" "$conn" "${mode:-1920x1080@60}" "${pos:-0,0}" "${scale:-1}" \
+            "${rot:-1}" "${prio:-$idx}" "${enabled:-1}" "${primary:-0}" >>"$OUT"
     done
-    printf '\n'
-    printf '    Geometry: 0,0 %s\n' "${current%@*}"
-    exit 0
-fi
+}
 
-if [[ "${1:-}" == "output."*".mode."* ]]; then
-    arg=${1#output.}
-    connector_arg=${arg%%.mode.*}
-    mode=${arg#*.mode.}
-    [[ "$connector_arg" == "$connector" ]] || exit 2
-    [[ " $modes " == *" $mode "* ]] || exit 9
-    [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
-    printf '%s\n' "$mode" >"$SD/kscreen_mode"
-    printf '%s\n' "$mode" >>"$SD/kscreen.log"
-    exit 0
-fi
+_virtual_block() {
+    [[ -f "$SD/virtual_display_present" ]] || return 1
+    local vname vres
+    vname=$(cat "$SD/virtual_display_name" 2>/dev/null || true)
+    vres=$(cat "$SD/virtual_display_resolution" 2>/dev/null || true)
+    [[ -n "$vname" ]] || return 1
+    printf '%s|%s|%s|0,0|1|1|9|1|0|1\n' "99" "Virtual-$vname" "${vres:-1920x1080}@60"
+}
 
+print_outputs() {
+    local line n conn mode pos scale rot prio enabled primary connected
+    {
+        cat "$OUT"
+        _virtual_block || true
+    } | while IFS='|' read -r n conn mode pos scale rot prio enabled primary connected; do
+        [[ -n "$conn" ]] || continue
+        printf 'Output: %s %s 0000-stub-uuid' "$n" "$conn"
+        [[ "$enabled" == 1 ]] && printf ' enabled' || printf ' disabled'
+        [[ "$connected" == 1 ]] && printf ' connected' || printf ' disconnected'
+        [[ "$primary" == 1 ]] && printf ' primary'
+        printf '\n'
+        printf '\tpriority %s\n' "$prio"
+        printf '\tDisplayPort\n'
+        printf '\tModes:'
+        local i=1 m marker
+        while IFS= read -r m; do
+            [[ -n "$m" ]] || continue
+            marker=
+            [[ "$m" == "$mode" || "$m" == "${mode%@*}@${mode#*@}" ]] || true
+            [[ "$m" == "$mode" ]] && marker='*'
+            printf ' %s:%s%s' "$i" "$m" "$marker"
+            i=$((i + 1))
+        done < <(_mode_list)
+        printf '\n'
+        printf '\tGeometry: %s %s\n' "$pos" "${mode%@*}"
+        printf '\tScale: %s\n' "$scale"
+        printf '\tRotation: %s\n' "$rot"
+    done
+}
+
+_set_field() {
+    local conn=$1 field=$2 value=$3
+    local line n c m p s r pr en pn co tmp
+    tmp=$(mktemp)
+    while IFS= read -r line; do
+        IFS='|' read -r n c m p s r pr en pn co <<<"$line"
+        if [[ "$c" == "$conn" ]]; then
+            case "$field" in
+                mode) m=$value ;;
+                position) p=$value ;;
+                scale) s=$value ;;
+                rotation) r=$value ;;
+                priority) pr=$value ;;
+                enabled) en=$value ;;
+                primary) pn=$value ;;
+            esac
+        fi
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$n" "$c" "$m" "$p" "$s" "$r" "$pr" "$en" "$pn" "$co" >>"$tmp"
+    done <"$OUT"
+    mv -f "$tmp" "$OUT"
+}
+
+_rotation_num() {
+    case "${1:-}" in
+        none) printf '1\n' ;;
+        left) printf '2\n' ;;
+        inverted) printf '4\n' ;;
+        right) printf '8\n' ;;
+        *) [[ "$1" =~ ^[0-9]+$ ]] && printf '%s\n' "$1" || return 1 ;;
+    esac
+}
+
+apply_settings() {
+    local arg conn setting value
+    for arg in "$@"; do
+        [[ "$arg" == output.* ]] || continue
+        conn=${arg#output.}; conn=${conn%%.*}
+        setting=${arg#output."$conn".}; setting=${setting%%.*}
+        value=${arg#output."$conn"."$setting"}; value=${value#.}
+
+        grep -qF -- "|$conn|" "$OUT" || continue
+
+        case "$setting" in
+            enable)
+                if [[ "${STUB_FORCE_ENABLE_FAIL:-0}" == 1 && "$conn" != Virtual-* ]]; then exit 9; fi
+                _set_field "$conn" enabled 1
+                [[ "$conn" == Virtual-* ]] || rm -f "$SD/kscreen_physical_disabled"
+                printf 'enable %s\n' "$conn" >>"$LOG" ;;
+            disable)
+                _set_field "$conn" enabled 0
+                [[ "$conn" == Virtual-* ]] || : >"$SD/kscreen_physical_disabled"
+                printf 'disable %s\n' "$conn" >>"$LOG" ;;
+            primary)
+                _set_field "$conn" primary 1
+                # only one primary output at a time
+                local l nn cc mm pp ss rr prr enn pnn coo tmp
+                tmp=$(mktemp)
+                while IFS= read -r l; do
+                    IFS='|' read -r nn cc mm pp ss rr prr enn pnn coo <<<"$l"
+                    [[ "$cc" == "$conn" ]] || pnn=0
+                    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$nn" "$cc" "$mm" "$pp" "$ss" "$rr" "$prr" "$enn" "$pnn" "$coo" >>"$tmp"
+                done <"$OUT"
+                mv -f "$tmp" "$OUT"
+                printf '%s\n' "$conn" >"$SD/kscreen_primary"
+                printf 'primary %s\n' "$conn" >>"$LOG" ;;
+            mode)
+                [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
+                if [[ "$conn" == Virtual-* ]]; then
+                    [[ "$value" == "$(cat "$SD/virtual_display_resolution" 2>/dev/null)"* ]] || exit 9
+                    printf '%s\n' "$value" >"$SD/virtual_display_mode"
+                else
+                    # each output advertises its own modes: the current one is
+                    # always acceptable, the shared list models the rest
+                    cur=$(awk -F'|' -v c="$conn" '$2 == c { print $3; exit }' "$OUT")
+                    [[ "$value" == "$cur" ]] || _mode_list | grep -Fxq -- "$value" || exit 9
+                fi
+                _set_field "$conn" mode "$value"
+                printf '%s\n' "$value" >"$SD/kscreen_mode"
+                printf '%s\n' "$value" >>"$LOG" ;;
+            position)
+                _set_field "$conn" position "$value"
+                printf 'position %s %s\n' "$conn" "$value" >>"$LOG" ;;
+            scale)
+                _set_field "$conn" scale "$value"
+                printf 'scale %s %s\n' "$conn" "$value" >>"$LOG" ;;
+            rotation)
+                value=$(_rotation_num "$value") || exit 2
+                _set_field "$conn" rotation "$value"
+                printf 'rotation %s %s\n' "$conn" "$value" >>"$LOG" ;;
+            priority) _set_field "$conn" priority "$value" ;;
+            *) exit 2 ;;
+        esac
+    done
+    return 0
+}
+
+_init
+
+case "${1:-}" in
+    -o|--outputs|--json|-j)
+        print_outputs
+        exit 0
+        ;;
+    --dpms)
+        case "${2:-}" in
+            show)
+                if [[ -f "$SD/virtual_display_present" ]] && [[ ! -f "$SD/kscreen_primary" ]]; then :; fi
+                local conn
+                conn=$(cut -d'|' -f2 "$OUT" 2>/dev/null | head -n1)
+                printf 'dpms mode for screen %s: %s\n' "${conn:-DP-3}" "$(cat "$SD/kscreen_dpms" 2>/dev/null || printf 'on')"
+                exit 0
+                ;;
+            on|off)
+                if [[ "${STUB_KSCREEN_DPMS_FAIL:-0}" == 1 || "${STUB_KSCREEN_DPMS_FAIL:-0}" == "$2" ]]; then exit 9; fi
+                printf '%s\n' "$2" >"$SD/kscreen_dpms"
+                printf 'dpms:%s\n' "$2" >>"$LOG"
+                exit 0
+                ;;
+            *) exit 2 ;;
+        esac
+        ;;
+    "")
+        exit 0
+        ;;
+    output.*)
+        [[ "${STUB_KSCREEN_FAIL:-0}" == 1 ]] && exit 9
+        apply_settings "$@"
+        exit 0
+        ;;
+esac
 exit 0

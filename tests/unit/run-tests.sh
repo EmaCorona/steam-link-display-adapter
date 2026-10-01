@@ -14,6 +14,7 @@ BASE_PATH="$PATH"
 
 PASS=0
 FAIL=0
+FAILED=()
 SANDBOX=
 RC=0
 
@@ -488,40 +489,61 @@ test_validation_system_logging() {
 
 load_lib
 
+# Each test runs in its own subshell (spec §10): no state can leak between
+# tests. run_unit aggregates the per-test results from the captured output.
+run_unit() {
+  local name=$1 _log _line
+  _log=$(mktemp "${TMPDIR:-/tmp}/slvu-out.XXXXXX")
+  # No command-substitution pipe: a descendant could keep it open and hang us.
+  ( "$name" ) >"$_log" 2>&1
+  cat -- "$_log"
+  while IFS= read -r _line; do
+    case "$_line" in
+      ok\ *) PASS=$((PASS + 1)) ;;
+      FAIL\ *) FAIL=$((FAIL + 1)); FAILED+=("${_line#FAIL }") ;;
+    esac
+  done <"$_log"
+  rm -f "$_log"
+}
+
 printf 'steam-link-display-adapter unit test suite\n\n'
 
 printf '%s\n' '--- display/connector ---'
-test_display_and_connector
+run_unit test_display_and_connector
 printf '\n'
 
 printf '%s\n' '--- resolution ---'
-test_resolution
+run_unit test_resolution
 printf '\n'
 
 printf '%s\n' '--- detection ---'
-test_detection
+run_unit test_detection
 printf '\n'
 
 printf '%s\n' '--- profile/state ---'
-test_profile_and_state
+run_unit test_profile_and_state
 printf '\n'
 
 printf '%s\n' '--- xwayland ---'
-test_xwayland
+run_unit test_xwayland
 printf '\n'
 
 printf '%s\n' '--- snapshot ---'
-test_snapshot
+run_unit test_snapshot
 printf '\n'
 
 printf '%s\n' '--- desktop backend ---'
-test_desktop_backend
+run_unit test_desktop_backend
 printf '\n'
 
 printf '%s\n' '--- config/system/logging ---'
-test_validation_system_logging
+run_unit test_validation_system_logging
 printf '\n'
 
 printf 'UNIT TESTS: PASS=%s FAIL=%s\n' "$PASS" "$FAIL"
-if (( FAIL == 0 )); then exit 0; fi
-exit 1
+if (( FAIL > 0 )); then
+  printf 'failed:\n'
+  printf '  %s\n' "${FAILED[@]}"
+  exit 1
+fi
+exit 0

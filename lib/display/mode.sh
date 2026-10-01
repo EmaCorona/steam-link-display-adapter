@@ -84,7 +84,8 @@ gamescope_get_host_mode_list() {
 gamescope_mode_list_contains() {
     local wanted=$1 list line mode res f modes_file
     if list=$(get_gamescope_mode_list) && [[ -n "$list" ]]; then
-        tr ' ' '\n' <<<"$list" | grep -Fxq "$wanted"
+        # Exact token match without a `| grep -Fxq` pipeline (pipefail/SIGPIPE).
+        [[ " $list " == *" $wanted "* ]]
         return $?
     fi
     # No X atom on this build: check modes.cfg, then fall back to the kernel
@@ -239,11 +240,11 @@ set_dynamic_modes_allowed() {
 }
 
 screen_sleep() {
-    if display_backend_is desktop; then return 0; else gamescope_screen_sleep "$@"; fi
+    if display_backend_is desktop; then desktop_screen_sleep "$@"; else gamescope_screen_sleep "$@"; fi
 }
 
 screen_wake() {
-    if display_backend_is desktop; then return 0; else gamescope_screen_wake "$@"; fi
+    if display_backend_is desktop; then desktop_screen_wake "$@"; else gamescope_screen_wake "$@"; fi
 }
 
 nudge_mode() {

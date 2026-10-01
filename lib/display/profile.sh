@@ -24,6 +24,24 @@ capture_host_profile() {
     ACTIVE_CONNECTOR=$connector
     HOST_CONNECTOR=$connector
 
+    if display_backend_is desktop; then
+        HOST_ORIGINAL_PRIMARY=$(desktop_get_primary_connector 2>/dev/null || true)
+        if [[ -n "$HOST_ORIGINAL_PRIMARY" ]]; then
+            log "Original Desktop primary output: $HOST_ORIGINAL_PRIMARY"
+        else
+            log "WARNING: original Desktop primary output could not be determined"
+        fi
+        HOST_ORIGINAL_LAYOUT=$(desktop_layout_snapshot 2>/dev/null || true)
+        if [[ -n "$HOST_ORIGINAL_LAYOUT" ]]; then
+            log "Original Desktop layout captured ($(desktop_output_names 2>/dev/null | wc -l) outputs)"
+        else
+            log "WARNING: original Desktop layout could not be captured"
+        fi
+    else
+        HOST_ORIGINAL_PRIMARY=''
+        HOST_ORIGINAL_LAYOUT=''
+    fi
+
     current=$(get_current_mode 2>/dev/null || true)
     if [[ -z "$current" ]]; then
         fail "unable to determine the current host mode (fail-closed)"

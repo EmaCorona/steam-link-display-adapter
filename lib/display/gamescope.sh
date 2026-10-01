@@ -77,28 +77,12 @@ gamescope_prepare_stream_mode() {
     # (spec §12 sequence: OUT/XWAYLAND_READY -> PREPARED -> GAME_LAUNCH).
     state_write 'PREPARED'
 
-    SCREEN_SLEEP_REQUESTED=1
-    if ! screen_sleep; then
-        fail "failed to put the external screen to sleep"
-        return 1
-    fi
-    log "External screen sleep requested"
-
     state_write 'STREAMING'
     SETUP_DONE=1
 }
 
 gamescope_restore_host_state() {
     local original_mode original_xwl
-
-    if (( SCREEN_SLEEP_REQUESTED )); then
-        if gamescope_screen_wake; then
-            log "External screen wake requested"
-        else
-            log "CRITICAL: failed to wake external screen"
-        fi
-        SCREEN_SLEEP_REQUESTED=0
-    fi
 
     if (( BACKUP_TAKEN || STALE_STATE_LOADED )) && [[ -f "$MODES_BACKUP" ]]; then
         if restore_modes_file; then
@@ -160,10 +144,6 @@ gamescope_recover_stale_state() {
 
     log "Saved run profile: connector=$(state_field ORIGINAL_CONNECTOR 2>/dev/null || true) mode=${verify_mode:-unavailable} xwayland=${stale_xwl:-unavailable}"
 
-    if ! gamescope_screen_wake; then
-        log "ERROR: stale-state recovery could not wake external screen"
-        return 1
-    fi
     if [[ -f "$MODES_BACKUP" ]]; then
         restore_modes_file || {
             log "ERROR: stale-state recovery could not restore modes.cfg"

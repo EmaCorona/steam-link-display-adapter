@@ -235,7 +235,7 @@ cd steam-link-display-adapter
 Then, in Steam → the game → **Properties → Launch Options**:
 
 ```text
-/home/USER/.local/bin/steam-link-display-adapter %command%
+$HOME/.local/bin/steam-link-display-adapter %command%
 ```
 
 Advanced configuration is optional (see [Configuration](#configuration)).
@@ -337,7 +337,7 @@ the virtual KWin output has been created and exposed through KScreen.
 Steam → Game → **Properties → Launch Options**:
 
 ```text
-steam-link-display-adapter %command%
+$HOME/.local/bin/steam-link-display-adapter %command%
 ```
 
 The Launch Option only activates the adapter: the target is resolved dynamically from the Steam Link
